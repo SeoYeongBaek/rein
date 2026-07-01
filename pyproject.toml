@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rein"
+version = "0.1.0"
+description = "Framework-agnostic middleware for AI agent safety and observability. Agent = Model + Harness."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "rein team" },
+]
+dependencies = [
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+    "sqlglot>=27.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+# litellm은 프로바이더 비종속 LLM 호출을 위한 선택 의존성 (CLAUDE.md §10)
+llm = ["litellm>=1.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+rein = "rein.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rein"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.coverage.run]
+source = ["src/rein"]
