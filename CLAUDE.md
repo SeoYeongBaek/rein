@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 이 문서는 rein 프로젝트에서 작업할 때 Claude가 따라야 할 지침이다.
-출처:코드베이스는 아직 없으므로 이 문서의 모든 기술적 사실은 기획서에서 직접 가져왔거나, 기획서의 원칙을
+출처: 코드베이스는 아직 없으므로 이 문서의 모든 기술적 사실은 기획서에서 직접 가져왔거나, 기획서의 원칙을
 근거로 명시적으로 확정한 것이다. 근거 없이 추측해서 채운 내용은 없다.
 
 ## 1. 프로젝트 정체성
@@ -79,6 +79,25 @@ Governance Toolkit, LangGraph HITL(time-travel 체크포인트) 등이
   이중 기록(같은 행동이 관측+집행 양쪽에서 찍히는 것)이 애초에 발생하지
   않게 한다.
 
+### 어댑터 인식 조건 (`observe_model`)
+
+`observe_model(client)`가 어떤 객체를 "어댑터로 인정"하는지는 두 갈래다.
+
+1. **내장 타입 자동 감지** — OpenAI·Anthropic·로컬 클라이언트는 타입
+   기반으로 즉시 매칭한다.
+2. **최소 프로토콜** — 내장 타입이 아니면 `extract_tool_calls(response)
+   -> list[ToolUse]` 단일 메서드 구현 여부로 판정한다. `_observe`는
+   기록 전용(§3 표)이라 판정을 되돌리거나 응답을 가로채 수정하는
+   메서드는 필요 없다.
+
+두 조건 다 만족하지 않으면 `observe_model()` 호출 시점에 즉시 에러 —
+§5 `stage_order`와 같은 fail-closed 패턴이다.
+
+이 프로토콜은 **공개 확장 포인트가 아니라 내장 어댑터의 내부 구현
+디테일**이다. 서드파티가 자기 프로바이더용 어댑터를 등록하는 공개
+플러그인 경로는 지금 열지 않는다 — §12 M4 "추가 어댑터" 항목에서
+별도로 설계한다. 지금 열면 M1 스코프로 슬며시 들어오는 크리프가 된다.
+
 ## 4. 공개 API — M1에 확정, 이후 불변
 
 수동 `intercept(tool_name, args, ctx)` 래핑 방식은 폐기한다(모든 호출부를
@@ -103,6 +122,45 @@ with Harness(record="run.jsonl") as h:
 CLI 표면(`rein seed`, `rein replay`, `rein rule-from`, `rein report`)도
 동일하게 공개 인터페이스로 취급한다.
 
+### Harness 생성자 계약
+
+```python
+Harness(
+    record: str,                            # 필수. 기록 없는 사용은 스코프 아웃(기둥 1·2 단독 서사 재등장 방지)
+    rules: str | list[str] | None = None,   # dev 작성 YAML + rein rule-from 자동 생성 YAML을 리스트로 조합. seed 규칙은 내장이라 경로 불필요
+    config: str = "rein.yaml",              # stage_order 등 설정. cwd 자동 탐색, 없으면 기본 4단계 순서
+)
+```
+
+`record`가 필수인 이유는 rein의 정체성이 기록 → 리플레이 → 규칙 루프
+자체이기 때문이다. 기록 없는 가드레일 단독 사용을 허용하면 §2에서 이미
+접은 기둥 1·2 단독 서사를 API가 다시 열어주는 셈이 된다.
+
+`rules`가 리스트를 받는 이유는 §7의 규칙 세 계층(seed/dev/auto)을
+조합할 때 dev가 쓴 YAML과 `rein rule-from`이 생성한 자동 규칙 파일을
+분리 관리해야 PR 리뷰 diff가 깨끗하기 때문이다.
+
+`config`는 자동 탐색이 기본이다. 5줄 통합 예시에 설정 파라미터가
+등장하지 않게 하기 위함이다.
+
+### register_tool 판정 계약
+
+non-allow 판정(`deny`/`retry`/`approve`)은 원본 함수를 호출하지 않고
+예외를 던진다. 조용한 차단은 §5 fail-closed 원칙 위반이다.
+
+```python
+class GuardrailVerdictError(Exception):
+    def __init__(self, verdict: str, rule_id: str, rationale: str, evt_id: str): ...
+
+class Denied(GuardrailVerdictError): ...
+class RetryRequested(GuardrailVerdictError): ...
+class ApprovalRequired(GuardrailVerdictError): ...
+```
+
+`retry`/`approve`도 하네스가 자동 재시도나 블로킹 승인 콜백을 내부
+구현하지 않고 동일하게 예외로 호출자에 위임한다. HITL 승인 UI나 재시도
+정책 엔진은 §10 "차별점은 규칙 합성 하나"와 §11 바벨 전략 위반이다.
+
 **M1 스코프 제약 — 동기 호출만 지원**: `register_tool`은 `async def`를
 거부한다.
 ```python
@@ -113,6 +171,41 @@ if inspect.iscoroutinefunction(func):
 위치 기반 매칭이 깨지기 때문에, "동시 호출을 감지해서 처리"하는 대신
 **애초에 등록을 막아 문제 자체를 스코프 아웃**한다. 비동기 지원은 M4
 이후 검토 대상이다.
+
+### CLI 명세
+
+```
+rein seed <run.jsonl>
+```
+이미 `Harness(record=...)`로 녹화된 JSONL을 검증만 한다(스키마 +
+critical outcome 0건 확인) 후 `golden_run.jsonl`로 지정한다. 스크립트를
+대신 실행해주는 러너가 아니다 — §10 "자체 구현은 얇게"에 걸리고,
+온보딩 순서상 seed(2단계)가 `register_tool` 부착(3단계)보다 앞서므로
+이 시점엔 계측된 도구가 아직 없다.
+
+```
+rein replay <run.jsonl> [--rules rules.yaml ...] [--mode verify|live] [--compare]
+```
+`--mode verify`(기본)는 replay-verify, `--mode live`는 live-rerun이며
+실행 시 §6 "정직한 한계" 경고를 출력한다. `--compare`는 가드레일 off/on
+A/B. `tool_name` 불일치는 §6 그대로 즉시 하드 에러.
+
+```
+rein rule-from <run.jsonl> --event evt_XXXX [--golden golden_run.jsonl] [-o rules.yaml] [--dry-run]
+```
+`--dry-run`은 후보 규칙과 회귀 매트릭스만 출력하고 파일에 쓰지 않는다
+(PR 전 리뷰용). 기존 `rules.yaml`이 있으면 덮어쓰지 않고 append하며
+`born_from`/`blocks`/`regressions`는 §8 그대로 채운다. `--golden`을
+안 주면 §7 콜드 스타트 안전장치 ②(합성 음성, 권한 테이블에서 도출)를
+쓴다 — 정확한 도출 알고리즘은 TODO: 가희 확정.
+
+```
+rein report <run.jsonl> --rules rules.yaml [-o report.html]
+```
+`--rules`는 필수다. §11의 리포트 4요소 중 ③④(후보 회귀 표, 채택 규칙
+회귀 매트릭스)가 기둥 3의 실물 증거이므로, `--rules` 없이 만든 리포트는
+rein이 뭘 하는지 보여주지 못하는 반쪽짜리다. 부분 리포트 모드는
+문서에 근거가 없으므로 만들지 않는다.
 
 ### 개발자 경험 흐름 (온보딩)
 
@@ -298,6 +391,12 @@ n번째 인터셉트 호출은 무조건 로그의 n번째 `tool_wrap` 이벤트
 쌓이면 넓힘). 최악의 경우에도 "틀려도 안전한 방향"(과소차단 회피)으로
 틀리게 설계한다.
 
+`rein rule-from`에 `--golden`이 없을 때는 ②가 자동 발동한다.
+`born_from` 이벤트와 다른 `(tool_name, agent.role)` 조합으로 찍힌
+`run.jsonl` 내 정상 호출들을 합성 음성으로 삼는 것이 최소 해석이지만,
+**권한 테이블에서 정확히 어떻게 음성을 도출할지 구체 알고리즘은 아직
+미정 — TODO: 가희 확정** (회귀 엔진 소유자 판단 영역).
+
 ## 8. 규칙 저장 형식 — provenance 박힌 YAML
 
 ```yaml
@@ -423,6 +522,18 @@ rule:
   더 잘 하고 스코프 크리프만 유발한다. 설정값은 UI가 아니라 YAML로
   받는다.
 
+- 데모 에이전트 모델 (M2, 검증 필요)
+  데모 시나리오(§7 킬러 데모)를 구동하는 에이전트의 실제 LLM은
+  GPT-4.1 Nano 또는 GPT-5.4 Nano로 잠정 확정한다 — 셋 중 가장 저렴하고,
+  §3 내장 어댑터 세 타입(OpenAI·Claude·로컬) 중 OpenAI에 바로 걸려
+  추가 엔지니어링이 필요 없다.
+  **검증 필요(M2 착수 전)**: 나노급 소형 모델이 데모 A 1단계의
+  과도한 권한 행사(DROP TABLE) 행동을 안정적으로 유도하는지 아직
+  확인되지 않았다. 모델이 너무 작으면 도구 호출을 주저하거나 형식을
+  못 맞춰 데모 자체가 안 설 수 있다. 스모크 테스트로 재현율을 먼저
+  확인하고, 실패하면 GPT-5 Mini($0.25/$2, 여전히 OpenAI 계열이라
+  어댑터 마찰 없음)로 즉시 대체한다.
+
 ## 12. 마일스톤 (구현 순서 가이드)
 
 | 단계 | 트랙 | 내용 |
@@ -430,7 +541,7 @@ rule:
 | M1 | 대회 | 인터셉터 + 가드레일 4단계 + JSONL 로그 + record/replay-verify/live-rerun 3모드 + 골든 시드(`rein seed`). 공개 API 시그니처 확정 |
 | M2 | 대회 | 실패→규칙(1·2단계)→리플레이 재검증 + 회귀 매트릭스 렌더 |
 | M3 | OSS | README + 어댑터 2종 + 라이선스 + 예제 (API는 M1에서 고정, 신규 설계 없음) |
-| M4 | OSS | 확장 버킷 — 규칙 생성 3단계(로컬 LLM 폴백), 추가 어댑터, 로컬 서버 대시보드, OWASP Top 10 추가 매핑, 비동기 도구 지원 검토. 임계 경로 밖 |
+| M4 | OSS | 확장 버킷 — 규칙 생성 3단계(로컬 LLM 폴백), 추가 어댑터(공개 확장 프로토콜 포함), 로컬 서버 대시보드, OWASP Top 10 추가 매핑, 비동기 도구 지원 검토. 임계 경로 밖 |
 
 여유가 생기면 M4 중에서도 **추가 어댑터를 최우선**으로 한다(OSS 채택률에
 직결). 3단계 LLM 폴백보다 우선.
