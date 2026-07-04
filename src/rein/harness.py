@@ -18,14 +18,21 @@ F = TypeVar("F", bound=Callable)
 
 
 class Harness:
-    def __init__(self, record: str | Path, rules: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        record: str | Path,
+        rules: str | list[str] | None = None,
+        config: str = "rein.yaml",
+    ) -> None:
         """
         Args:
             record: 이벤트를 append-only JSONL로 기록할 경로.
-            rules: provenance 박힌 YAML 룰셋 경로 (없으면 기본 정책 번들만 적용).
+            rules: provenance 박힌 YAML 룰셋 경로. 리스트로 여러 파일 조합 가능.
+            config: stage_order 등 파이프라인 설정 파일 경로. cwd 자동 탐색.
         """
         self.record_path = Path(record)
-        self.rules_path = Path(rules) if rules else None
+        self.rules = rules
+        self.config = config
         # TODO(현준): 인터셉터 / 이벤트 저장소 / 가드레일 파이프라인 wiring
 
     def register_tool(self, func: F) -> F:
