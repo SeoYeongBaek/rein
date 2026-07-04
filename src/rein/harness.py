@@ -13,8 +13,11 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar, Any, Dict, Tuple
 
+from typing import Any, Dict, Tuple, TypeVar
+
+from rein.adapters import is_recognized_adapter
+from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
 from rein.guardrails.verdict import Verdict
 from rein.guardrails.exceptions import Denied, RetryRequested, ApprovalRequired
 
@@ -26,76 +29,83 @@ class Context:
 
 class Harness:
     def __init__(
-        self, 
-        record: str | Path, 
-        rules: str | list[str] | None = None,  # 피드백 반영: list[str] 명세 일치
-        config: str = "rein.yaml"              # 피드백 반영: 기본값 명세 일치
+        self,
+        record: str | Path,
+        rules: str | list[str] | None = None,
+        config: str = "rein.yaml",
     ) -> None:
         """
         Args:
             record: 이벤트를 append-only JSONL로 기록할 경로.
-            rules: provenance 박힌 YAML 룰셋 경로 (없으면 기본 정책 번들만 적용).
-            config: stage_order 등 설정 (기본값 rein.yaml)
+            rules: provenance 박힌 YAML 룰셋 경로. 리스트로 여러 파일 조합 가능.
+            config: stage_order 등 파이프라인 설정 파일 경로. cwd 자동 탐색.
         """
         self.record_path = Path(record)
+        self.rules = rules
+        self.config = config
+        self._observed_client: Any | None = None  # §3: 기본 비활성
+        self._custom_stages: dict[str, StageFn] = {}
         
-        # rules가 리스트로 들어올 수도 있으므로 각각 Path 객체로 변환 처리
-        if isinstance(rules, list):
-            self.rules_path = [Path(r) for r in rules]
-        else:
-            self.rules_path = Path(rules) if rules else None
-            
-        self.config_path = Path(config)
-        
-        # --- [현준 구현] 가드레일 파이프라인 wiring ---
-        self.registered_stages: Dict[str, Callable] = {}
-        
-        # 1. 기본 4단계 스테이지 파이프라인 등록 (순수 Python 함수)
-        self.register_stage("schema", self._default_schema_check)
-        self.register_stage("permission", self._default_permission_check)
-        self.register_stage("budget", self._default_budget_check)
-        self.register_stage("safety", self._default_safety_check)
-        
-        # 2. 설정된 스테이지 순서 (yaml 파싱 전 임시 하드코딩)
-        self.stage_order = ["schema", "permission", "budget", "safety"]
-        
-        # 3. Fail-Closed 원칙 검증: 미등록 스테이지가 있으면 즉시 실패
-        self._validate_stages()
+        # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
+        self._stage_order: list[str] = load_stage_order(config)
+        self._resolved_stage_order: list[str] | None = None
+        self._sealed = False
 
-    def _validate_stages(self) -> None:
-        for stage in self.stage_order:
-            if stage not in self.registered_stages:
-                raise ValueError(
-                    f"Fail-Closed Error: 미등록 스테이지 '{stage}'가 stage_order에 존재합니다. "
-                    f"Harness 초기화를 중단합니다."
-                )
+        # --- [현준 구현] 기본 4단계 스테이지 등록 ---
+        self._default_stages: dict[str, StageFn] = {
+            "schema": self._default_schema_check,
+            "permission": self._default_permission_check,
+            "budget": self._default_budget_check,
+            "safety": self._default_safety_check,
+        }
 
-    def register_stage(self, name: str, func: Callable) -> None:
-        self.registered_stages[name] = func
+    def register_stage(self, name: str, fn: StageFn) -> None:
+        """§5 스테이지 확장 인터페이스"""
+        if self._sealed:
+            raise RuntimeError(
+                "register_stage는 register_tool 데코레이션/__enter__ 이전에만 호출 가능합니다."
+            )
+        self._custom_stages[name] = fn
+
+    def _activate(self) -> None:
+        """stage_order를 확정(seal)한다."""
+        if self._sealed:
+            return
+        self._resolved_stage_order = resolve_stage_order(self._stage_order, self._custom_stages)
+        self._sealed = True
 
     def register_tool(self, func: F) -> F:
         """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다."""
-        # M1 스코프 제약: 비동기 함수는 등록 자체를 거부
         if inspect.iscoroutinefunction(func):
             raise TypeError("M1은 동기 함수만 지원합니다")
             
+        # 도구가 실행되기 전 가장 이른 시점에 파이프라인 봉인(seal) 및 확정
+        self._activate()
+        
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             tool_call = {"name": func.__name__, "args": kwargs}
-            ctx = Context()
+            ctx = None  # 추후 Context() 객체 연동 시 수정
             
-            # ① 검사: 가드레일 파이프라인 통과 여부 확인
+            # ① 검사: 가드레일 파이프라인 통과 여부 확인 (현준 로직)
             self._evaluate_pipeline(tool_call, ctx)
             
-            # ② 기록: 이벤트 저장소 기록 (추후 구현)
-            
-            # 실제 도구 실행
+            # ② 실제 도구 실행
             return func(*args, **kwargs)
+            
         return wrapper  # type: ignore
 
-    def _evaluate_pipeline(self, tool_call: Dict[str, Any], ctx: Context) -> None:
+    def _evaluate_pipeline(self, tool_call: Dict[str, Any], ctx: Any) -> None:
         """결정론적 4단계 검사 (Short-circuit 방식)"""
-        for stage_name in self.stage_order:
-            stage_func = self.registered_stages[stage_name]
+        if not self._resolved_stage_order:
+            return
+
+        for stage_name in self._resolved_stage_order:
+            # 커스텀 스테이지 우선 확인, 없으면 기본 스테이지 사용
+            stage_func = self._custom_stages.get(stage_name) or self._default_stages.get(stage_name)
+            
+            if not stage_func:
+                raise ValueError(f"정의되지 않은 스테이지입니다: {stage_name}")
+
             verdict, rule_id, rationale, evt_id = stage_func(tool_call, ctx)
             
             # 첫 번째로 나오는 non-allow 판정에서 즉시 파이프라인 종료 (Fail-fast)
@@ -107,23 +117,42 @@ class Harness:
                 elif verdict == Verdict.RETRY:
                     raise RetryRequested(str(verdict), rule_id, rationale, evt_id)
 
+    def observe_model(self, client: Any) -> None:
+        """모델 클라이언트 관측을 명시적으로 켠다(§3, 기본 비활성/옵트인)."""
+        if not is_recognized_adapter(client):
+            raise TypeError(
+                f"observe_model: {type(client)!r}는 인식된 어댑터가 아닙니다. "
+                "내장 타입(OpenAI/Anthropic/로컬)도 아니고 "
+                "extract_tool_calls(response) 메서드도 구현하지 않았습니다."
+            )
+        self._observed_client = client
+        raise NotImplementedError
+
     # --- 기본 스테이지 더미 구현체 (반환값: Verdict, rule_id, rationale, evt_id) ---
-    def _default_schema_check(self, tool_call: Dict[str, Any], ctx: Context) -> Tuple[Verdict, str, str, str]:
+    def _default_schema_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_permission_check(self, tool_call: Dict[str, Any], ctx: Context) -> Tuple[Verdict, str, str, str]:
+    def _default_permission_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_budget_check(self, tool_call: Dict[str, Any], ctx: Context) -> Tuple[Verdict, str, str, str]:
+    def _default_budget_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_safety_check(self, tool_call: Dict[str, Any], ctx: Context) -> Tuple[Verdict, str, str, str]:
+    def _default_safety_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
     def __enter__(self) -> Harness:
-        # TODO(현준): 모델 클라이언트 래핑 진입점 연결 (관측 전용, §3 표 참고)
+        # 방안 B(§4): with Harness(...) as h: agent.run(...) 로 에이전트
+        # 루프 전체를 감싸는 진입점. 여기서 켜는 것은 이벤트 저장소(§6)
+        # 수명 주기뿐이다. 모델 클라이언트 관측(_observe)은 자동으로
+        # 켜지 않는다 — §3 "기본 비활성/옵트인"이므로 관측이 필요하면
+        # with 블록 안에서 별도로 observe_model(client)을 호출해야 한다.
+        self._activate()
+        # TODO(현준): 이벤트 저장소(append-only JSONL) 핸들 준비/wiring.
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        # TODO(현준): 정리 및 flush
+def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        # TODO(현준): 이벤트 저장소 flush/close. observe_model()로 등록된
+        # 클라이언트가 있다면 여기서 원상 복구/정리한다. __exit__은
+        # 정리 전용이지 집행 지점이 아니다.
         return None

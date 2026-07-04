@@ -1,8 +1,37 @@
-# Environments
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+
+# 가상환경
 .venv/
 venv/
 env/
 
-# Python
-__pycache__/
-*.pyc
+# 빌드·배포
+dist/
+build/
+*.egg-info/
+*.egg
+
+# 테스트·커버리지
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# 린터
+.ruff_cache/
+
+# rein 산출물 (로컬 실행 결과물 — 커밋 불필요)
+*.jsonl
+*.html
+rein.yaml
+
+# IDE
+.vscode/
+.idea/
+*.DS_Store

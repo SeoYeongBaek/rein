@@ -84,7 +84,12 @@ Governance Toolkit, LangGraph HITL(time-travel 체크포인트) 등이
 `observe_model(client)`가 어떤 객체를 "어댑터로 인정"하는지는 두 갈래다.
 
 1. **내장 타입 자동 감지** — OpenAI·Anthropic·로컬 클라이언트는 타입
-   기반으로 즉시 매칭한다.
+   기반으로 즉시 매칭한다. **TODO: 현준 확정** — "로컬 클라이언트"를
+   타입으로 자동 감지하는 구체적 기준(모듈명, 클래스 계층 등)이 아직
+   미정이다. 현재 구현(`adapters/is_builtin_model_client`)은
+   `openai`/`anthropic` 모듈 prefix만 인식하며, 로컬 클라이언트
+   자동 감지는 빠져 있다 — 그 전까지 로컬 클라이언트는 2번 최소
+   프로토콜 경로로만 인식된다.
 2. **최소 프로토콜** — 내장 타입이 아니면 `extract_tool_calls(response)
    -> list[ToolUse]` 단일 메서드 구현 여부로 판정한다. `_observe`는
    기록 전용(§3 표)이라 판정을 되돌리거나 응답을 가로채 수정하는
@@ -264,6 +269,10 @@ schema → permission → budget → safety 순서를 지킨다.
 h.register_stage("safety_v2", my_custom_stage)  # 로직 정의는 Python
 ```
 
+`register_stage`는 하네스가 활성화(첫 `register_tool` 데코레이션 또는
+`__enter__` 진입)되기 전까지만 호출 가능하다. 활성화 이후 호출하면
+조용히 무시하지 않고 `RuntimeError`를 던진다.
+
 **순서 재배열은 YAML이 담당**한다(로직은 코드, 순서는 설정이라는
 역할 분리):
 ```yaml
@@ -272,9 +281,16 @@ stage_order: [schema, permission, budget, safety_v2]
 ```
 
 **fail-closed 원칙**: `stage_order`가 미등록 스테이지 이름을 참조하면
-`Harness()` 생성 자체를 즉시 실패시킨다(초기화 시점, 런타임 아님).
-오타나 미등록 이름을 조용히 무시하면 "안전 실패"가 아니라 "안전
-미실행" 상태로 돌아갈 위험이 있으므로, 조용한 무시는 절대 금지한다.
+실패해야 한다. 검증은 두 단계로 나뉜다 — YAML 구조(`stage_order`가
+문자열 리스트인지)는 `Harness()` 생성 시점에 바로 확인한다. 스테이지
+"이름"이 실제로 등록됐는지(내장 4단계이거나 `register_stage`로 등록된
+커스텀 스테이지인지)는, `register_stage`가 인스턴스 메서드라 `__init__`
+실행 도중에는 아직 커스텀 스테이지가 등록될 수 없으므로, 도구가 실제로
+실행되기 전 가장 이른 시점 — 첫 `register_tool` 데코레이션 또는
+`__enter__` 진입 — 에 확정(seal)한다. 이 시점에 미등록 이름이 남아
+있으면 `UnknownStageError`를 던진다. 오타나 미등록 이름을 조용히
+무시하면 "안전 실패"가 아니라 "안전 미실행" 상태로 돌아갈 위험이
+있으므로, 조용한 무시는 절대 금지한다.
 
 ## 6. 이벤트 저장소 + 리플레이
 

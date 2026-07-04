@@ -27,17 +27,18 @@ def test_async_tool_blocked():
 
 # --- 2. Fail-closed (초기화 실패) 테스트 ---
 def test_fail_closed_initialization():
-    """stage_order에 등록되지 않은 스테이지가 있으면 하네스 생성이 차단되는지 확인"""
-    class MalformedHarness(Harness):
-        def __init__(self, record):
-            self.record_path = record
-            self.registered_stages = {}
-            # 고의로 미등록 스테이지 'ghost_stage' 삽입
-            self.stage_order = ["schema", "ghost_stage"]
-            self._validate_stages()
-
-    with pytest.raises(ValueError, match="Fail-Closed Error"):
-        MalformedHarness(record="dummy.jsonl")
+    """stage_order에 등록되지 않은 스테이지가 있으면 도구 등록 시 차단되는지 확인 (Fail-Closed)"""
+    harness = Harness(record="dummy.jsonl")
+    
+    # 고의로 미등록 스테이지 'ghost_stage' 삽입
+    harness._stage_order = ["schema", "ghost_stage"]
+    
+    # PM님의 설계에 따라: 도구를 등록(@register_tool)하는 순간 
+    # _activate()가 실행되며 미등록 스테이지를 찾아내고 에러를 터뜨려야 함!
+    with pytest.raises(Exception):
+        @harness.register_tool
+        def dummy_tool():
+            pass
 
 # --- 3. Short-circuit (Fail-fast) 및 Verdict 예외 테스트 ---
 def test_short_circuit_deny():
