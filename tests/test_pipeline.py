@@ -29,7 +29,10 @@ def test_async_tool_blocked():
 
 # --- 2. Fail-closed (초기화 실패) 테스트 ---
 def test_fail_closed_initialization():
-    """stage_order에 등록되지 않은 스테이지가 있으면 도구 등록 시 차단되는지 확인 (Fail-Closed)"""
+    """
+    stage_order에 등록되지 않은 스테이지가 있으면 도구 등록 시
+    차단되는지 확인 (Fail-Closed)
+    """
     harness = Harness(record="dummy.jsonl")
     
     # 고의로 미등록 스테이지 'ghost_stage' 삽입
@@ -37,7 +40,7 @@ def test_fail_closed_initialization():
     
     # PM님의 설계에 따라: 도구를 등록(@register_tool)하는 순간 
     # _activate()가 실행되며 미등록 스테이지를 찾아내고 에러를 터뜨려야 함!
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         @harness.register_tool
         def dummy_tool():
             pass
