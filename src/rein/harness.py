@@ -151,7 +151,7 @@ class Harness:
         # TODO(현준): 이벤트 저장소(append-only JSONL) 핸들 준비/wiring.
         return self
 
-def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         # TODO(현준): 이벤트 저장소 flush/close. observe_model()로 등록된
         # 클라이언트가 있다면 여기서 원상 복구/정리한다. __exit__은
         # 정리 전용이지 집행 지점이 아니다.
