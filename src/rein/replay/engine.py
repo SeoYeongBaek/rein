@@ -89,7 +89,7 @@ class ReplayEngine:
 
         if self._cursor >= len(self._recorded):
             raise ReplayMismatchError(
-                f"리플레이 이벤트 소진: position={self._cursor}, " f"총 {len(self._recorded)}개"
+                f"리플레이 이벤트 소진: position={self._cursor}, 총 {len(self._recorded)}개"
             )
 
         recorded = self._recorded[self._cursor]
