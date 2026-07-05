@@ -15,7 +15,19 @@
         agent.run(task="...")
 """
 
+from rein.guardrails.exceptions import (
+    ApprovalRequired,
+    Denied,
+    GuardrailVerdictError,
+    RetryRequested,
+)
 from rein.harness import Harness
 
-__all__ = ["Harness"]
+__all__ = [
+    "Harness",
+    "GuardrailVerdictError",
+    "Denied",
+    "RetryRequested",
+    "ApprovalRequired",
+]
 __version__ = "0.1.0"
