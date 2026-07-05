@@ -128,16 +128,24 @@ class Harness:
         raise NotImplementedError
 
     # --- 기본 스테이지 더미 구현체 (반환값: Verdict, rule_id, rationale, evt_id) ---
-    def _default_schema_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
+    def _default_schema_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_permission_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
+    def _default_permission_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_budget_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
+    def _default_budget_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_safety_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
+    def _default_safety_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
     def __enter__(self) -> Harness:

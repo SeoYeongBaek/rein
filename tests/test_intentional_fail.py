@@ -1,7 +1,7 @@
 #  pytest tests/test_intentional_fail.py -v
 import pytest
-from rein.harness import Harness
 from rein.guardrails.verdict import Verdict
+from rein.harness import Harness
 
 @pytest.mark.xfail(reason="의도적인 deny")
 def test_this_will_fail_deliberately():
