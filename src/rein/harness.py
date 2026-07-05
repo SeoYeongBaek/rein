@@ -22,9 +22,12 @@ from rein.guardrails.verdict import Verdict
 
 F = TypeVar("F", bound=Callable)
 
+
 class Context:
     """도구 호출 컨텍스트 (이후 예산 누적, 에이전트 역할 등을 저장)"""
+
     pass
+
 
 class Harness:
     def __init__(
@@ -44,7 +47,7 @@ class Harness:
         self.config = config
         self._observed_client: Any | None = None  # §3: 기본 비활성
         self._custom_stages: dict[str, StageFn] = {}
-        
+
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
         self._stage_order: list[str] = load_stage_order(config)
         self._resolved_stage_order: list[str] | None = None
@@ -77,20 +80,20 @@ class Harness:
         """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다."""
         if inspect.iscoroutinefunction(func):
             raise TypeError("M1은 동기 함수만 지원합니다")
-            
+
         # 도구가 실행되기 전 가장 이른 시점에 파이프라인 봉인(seal) 및 확정
         self._activate()
-        
+
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             tool_call = {"name": func.__name__, "args": kwargs}
             ctx = None  # 추후 Context() 객체 연동 시 수정
-            
+
             # ① 검사: 가드레일 파이프라인 통과 여부 확인 (현준 로직)
             self._evaluate_pipeline(tool_call, ctx)
-            
+
             # ② 실제 도구 실행
             return func(*args, **kwargs)
-            
+
         return wrapper  # type: ignore
 
     def _evaluate_pipeline(self, tool_call: dict[str, Any], ctx: Any) -> None:
@@ -101,12 +104,12 @@ class Harness:
         for stage_name in self._resolved_stage_order:
             # 커스텀 스테이지 우선 확인, 없으면 기본 스테이지 사용
             stage_func = self._custom_stages.get(stage_name) or self._default_stages.get(stage_name)
-            
+
             if not stage_func:
                 raise ValueError(f"정의되지 않은 스테이지입니다: {stage_name}")
 
             verdict, rule_id, rationale, evt_id = stage_func(tool_call, ctx)
-            
+
             # 첫 번째로 나오는 non-allow 판정에서 즉시 파이프라인 종료 (Fail-fast)
             if verdict != Verdict.ALLOW:
                 if verdict == Verdict.DENY:
