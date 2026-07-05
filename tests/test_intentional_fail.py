@@ -4,6 +4,7 @@ import pytest
 from rein.guardrails.verdict import Verdict
 from rein.harness import Harness
 
+
 @pytest.mark.xfail(reason="의도적인 deny")
 def test_this_will_fail_deliberately():
     """고의로 실패(FAIL)를 유발하는 테스트"""
