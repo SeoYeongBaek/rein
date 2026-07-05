@@ -2,6 +2,7 @@
 from rein.harness import Harness
 from rein.guardrails.verdict import Verdict
 
+@pytest.mark.xfail(reason="의도적인 deny")
 def test_this_will_fail_deliberately():
     """고의로 실패(FAIL)를 유발하는 테스트"""
     h = Harness(record="dummy.jsonl")
