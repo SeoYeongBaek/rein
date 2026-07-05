@@ -1,8 +1,10 @@
 # pytest tests/test_pipeline.py -v
 import pytest
-from rein.harness import Harness
+
+from rein.guardrails.exceptions import ApprovalRequired, Denied
 from rein.guardrails.verdict import Verdict
-from rein.guardrails.exceptions import Denied, ApprovalRequired
+from rein.harness import Harness
+
 
 # --- 1. 기본 실행 및 비동기 차단 테스트 ---
 def test_sync_tool_allow():

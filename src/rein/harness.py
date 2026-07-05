@@ -13,13 +13,12 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-
-from typing import Any, Dict, Tuple, TypeVar
+from typing import Any, TypeVar
 
 from rein.adapters import is_recognized_adapter
 from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
+from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
 from rein.guardrails.verdict import Verdict
-from rein.guardrails.exceptions import Denied, RetryRequested, ApprovalRequired
 
 F = TypeVar("F", bound=Callable)
 
@@ -94,7 +93,7 @@ class Harness:
             
         return wrapper  # type: ignore
 
-    def _evaluate_pipeline(self, tool_call: Dict[str, Any], ctx: Any) -> None:
+    def _evaluate_pipeline(self, tool_call: dict[str, Any], ctx: Any) -> None:
         """결정론적 4단계 검사 (Short-circuit 방식)"""
         if not self._resolved_stage_order:
             return
@@ -129,16 +128,16 @@ class Harness:
         raise NotImplementedError
 
     # --- 기본 스테이지 더미 구현체 (반환값: Verdict, rule_id, rationale, evt_id) ---
-    def _default_schema_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_schema_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_permission_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_permission_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_budget_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_budget_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_safety_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_safety_check(self, tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
     def __enter__(self) -> Harness:

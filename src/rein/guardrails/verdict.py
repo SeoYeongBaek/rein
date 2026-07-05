@@ -1,5 +1,6 @@
 from enum import IntEnum
 
+
 class Verdict(IntEnum):
     """
     판정 우선순위 (숫자가 클수록 더 제한적이며 우선순위가 높음)
