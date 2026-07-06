@@ -38,8 +38,16 @@ def _load_rules(rules_paths: list[str]) -> list[dict]:
     for path in rules_paths:
         text = Path(path).read_text(encoding="utf-8")
         for doc in yaml.safe_load_all(text):
-            if doc and doc.get("rule"):
-                rules.append(doc["rule"])
+            if doc is None:
+                continue  # `---`가 만드는 빈 문서 — 정상 케이스, 조용히 스킵
+            if "rule" not in doc:
+                warnings.warn(
+                    f"{path}: 'rule' 키가 없는 YAML 문서를 건너뜁니다 "
+                    f"(최상위 키: {sorted(doc.keys())})",
+                    stacklevel=2,
+                )
+                continue
+            rules.append(doc["rule"])
     return rules
 
 
@@ -74,7 +82,13 @@ def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
     matched = [rule.get("then", "allow") for rule in rules if _rule_matches(rule, evt)]
     if not matched:
         return "allow"
-    return max(matched, key=lambda v: _VERDICT_PRIORITY.get(v, 0))
+    for verdict in matched:
+        if verdict not in _VERDICT_PRIORITY:
+            raise ValueError(
+                f"규칙의 then 값이 잘못되었습니다: {verdict!r} "
+                f"(허용값: {sorted(_VERDICT_PRIORITY)})"
+            )
+    return max(matched, key=lambda v: _VERDICT_PRIORITY[v])
 
 
 class ReplayMode(StrEnum):
@@ -143,7 +157,11 @@ def replay(
         return
 
     if compare:
-        _print_compare(events, rules or [])
+        try:
+            _print_compare(events, rules or [])
+        except ValueError as e:
+            typer.echo(f"오류: {e}", err=True)
+            raise typer.Exit(1) from None
     else:
         _print_events(events)
 
@@ -161,11 +179,16 @@ def _print_events(events: list[dict]) -> None:
         outcome = evt.get("outcome") or {}
         severity = outcome.get("severity", "-")
         severity_style = {"critical": "red", "warning": "yellow", "info": "green"}.get(severity, "")
+        # 스타일이 없는(미지정) severity에 빈 태그 "[]...[/]" 를 씌우면 rich가
+        # MarkupError를 던진다 — 스타일이 있을 때만 태그로 감싼다.
+        severity_text = (
+            f"[{severity_style}]{severity}[/{severity_style}]" if severity_style else severity
+        )
         table.add_row(
             str(evt.get("seq", "-")),
             evt.get("tool_name", "-"),
             evt.get("verdict", "-"),
-            f"[{severity_style}]{severity}[/{severity_style}]",
+            severity_text,
             outcome.get("detail", "-"),
         )
 

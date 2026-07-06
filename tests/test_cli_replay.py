@@ -1,6 +1,7 @@
 """rein replay CLI 테스트 (CLAUDE.md §4)."""
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -53,6 +54,19 @@ def test_replay_lists_events(tmp_path):
     assert result.exit_code == 0
     assert "execute_sql" in result.output
     assert "read_file" in result.output
+
+
+def test_replay_lists_events_with_unstyled_severity(tmp_path):
+    """severity가 critical/warning/info 중 하나가 아니면 rich 마크업 태그가
+    빈 스타일("[]...[/]")이 되어 MarkupError로 크래시하던 버그의 회귀 테스트."""
+    log = tmp_path / "run.jsonl"
+    evt = _tool_wrap(0, "execute_sql", {"query": "SELECT 1"})
+    evt["outcome"] = {"status": "ok", "severity": "unknown", "detail": ""}
+    _write_jsonl(log, [evt])
+
+    result = runner.invoke(app, ["replay", str(log)])
+    assert result.exit_code == 0
+    assert "unknown" in result.output
 
 
 def test_replay_missing_file_exits_1(tmp_path):
@@ -169,6 +183,25 @@ def test_compare_scope_agent_role_matches(tmp_path):
     assert "CHANGED" in result.output
 
 
+def test_compare_rules_doc_missing_rule_key_warns_and_is_skipped(tmp_path):
+    """'rule' 키가 없는 문서를 조용히 무시하면 규칙이 누락된 채 비교가 진행될 수
+    있다 — 경고를 남기고, 유효한 나머지 규칙은 정상 로드되는지 확인."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(log, [_tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})])
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump({"not_rule": {"id": "r1"}})
+        + "---\n"
+        + yaml.dump({"rule": {"id": "r2", "when": {"tool": "execute_sql"}, "then": "deny"}}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    assert "CHANGED" in result.output  # r2는 여전히 정상 적용됨
+
+
 def test_compare_multi_doc_rules_file_appends(tmp_path):
     """rein rule-from의 append 동작을 받아내는 형태 — 파일 하나에 규칙 여러 개(--- 구분)."""
     log = tmp_path / "run.jsonl"
@@ -228,4 +261,7 @@ def test_compare_counts_changed_events(tmp_path):
 
     result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
     assert result.exit_code == 0
-    assert "2개" in result.output  # 2개 CHANGED
+    match = re.search(r"총 (\d+)개 이벤트 중 (\d+)개 판정 변경", result.output)
+    assert match is not None
+    assert match.group(1) == "3"  # 전체 이벤트 수
+    assert match.group(2) == "2"  # CHANGED 수
