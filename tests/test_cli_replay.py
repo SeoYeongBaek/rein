@@ -114,6 +114,103 @@ def test_compare_with_non_matching_rule_shows_no_change(tmp_path):
     assert "CHANGED" not in result.output
 
 
+def test_compare_scope_agent_role_filters_out_non_matching(tmp_path):
+    """scope.agent.role이 이벤트 context.agent_role과 다르면 규칙이 적용되지 않는다."""
+    log = tmp_path / "run.jsonl"
+    evt = _tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})
+    evt["context"] = {"agent_role": "admin"}
+    _write_jsonl(log, [evt])
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump(
+            {
+                "rule": {
+                    "id": "rule_test",
+                    "when": {"tool": "execute_sql"},
+                    "scope": {"agent.role": "content_editor"},
+                    "then": "deny",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    assert "CHANGED" not in result.output
+
+
+def test_compare_scope_agent_role_matches(tmp_path):
+    log = tmp_path / "run.jsonl"
+    evt = _tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})
+    evt["context"] = {"agent_role": "content_editor"}
+    _write_jsonl(log, [evt])
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump(
+            {
+                "rule": {
+                    "id": "rule_test",
+                    "when": {"tool": "execute_sql"},
+                    "scope": {"agent.role": "content_editor"},
+                    "then": "deny",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    assert "CHANGED" in result.output
+
+
+def test_compare_multi_doc_rules_file_appends(tmp_path):
+    """rein rule-from의 append 동작을 받아내는 형태 — 파일 하나에 규칙 여러 개(--- 구분)."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(
+        log,
+        [
+            _tool_wrap(0, "execute_sql", {"query": "SELECT 1"}),
+            _tool_wrap(1, "delete_file", {"path": "/tmp/x"}),
+        ],
+    )
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump({"rule": {"id": "r1", "when": {"tool": "execute_sql"}, "then": "deny"}})
+        + "---\n"
+        + yaml.dump({"rule": {"id": "r2", "when": {"tool": "delete_file"}, "then": "approve"}}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    # 두 이벤트 모두 규칙에 걸려 판정이 바뀌어야 함 (두 번째 문서 무시되면 1건만 CHANGED)
+    assert result.output.count("CHANGED") == 2
+    assert "총 2개 이벤트 중 2개 판정 변경" in result.output
+
+
+def test_compare_conflicting_rules_pick_most_restrictive(tmp_path):
+    """같은 이벤트에 여러 규칙이 매칭되면 deny > approve > retry > allow 중 가장 제한적인 것."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(log, [_tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})])
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump({"rule": {"id": "r1", "when": {"tool": "execute_sql"}, "then": "approve"}})
+        + "---\n"
+        + yaml.dump({"rule": {"id": "r2", "when": {"tool": "execute_sql"}, "then": "deny"}}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    assert "deny" in result.output
+
+
 def test_compare_counts_changed_events(tmp_path):
     log = tmp_path / "run.jsonl"
     _write_jsonl(

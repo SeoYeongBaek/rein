@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 
+# position 기반 매칭이 깨졌을 때(seq/index 불일치, tool_name 불일치, args 키 집합 불일치,
+# 리플레이 이벤트 소진) 던지는 단일 예외. §6 fail-closed — 조용히 넘어가지 않는다.
 class ReplayMismatchError(Exception):
     pass
 
@@ -35,22 +37,31 @@ def _load_tool_wrap_events(path: Path) -> list[dict[str, Any]]:
             evt = json.loads(stripped)
             if evt.get("source") == "tool_wrap":
                 events.append(evt)
+
+    # [§4/§6 충족] position(리스트 index) 기반 매칭의 전제 조건 검증.
+    # seq가 index와 어긋나면 이후 모든 매칭이 조용히 틀어지므로 로드 시점에 즉시 하드 에러.
+    for i, evt in enumerate(events):
+        if evt.get("seq") != i:
+            raise ReplayMismatchError(
+                f"seq 불일치 (index={i}): 기록된 seq={evt.get('seq')!r}, "
+                f"tool_name={evt.get('tool_name')!r} — 로그-실행 순서 어긋남"
+            )
     return events
 
 
 class ReplayEngine:
     """VCR 패턴 자체 구현 (vcrpy 미사용, CLAUDE.md §6)."""
 
-    """모드에 따라 다르게 초기화
-    record는 이벤트 로드 안 함, 엔진은 모드 인식만
-    replay-verify는 JSONL로드
-    live-rerun은 JSONL로드 + 한계 경고 출력"""
-
     def __init__(
         self,
         log_path: str | Path,
         mode: Literal["record", "replay-verify", "live-rerun"] = "replay-verify",
     ) -> None:
+        """모드별로 다르게 초기화한다.
+        record: 이벤트 로드 안 함(엔진은 모드 인식만, 녹화는 EventRecorder 담당).
+        replay-verify: JSONL 로드.
+        live-rerun: JSONL 로드 + §6 "정직한 한계" 경고 출력.
+        """
         self._log_path = Path(log_path)
         self._mode = mode
         self._cursor = 0
@@ -68,10 +79,12 @@ class ReplayEngine:
 
     @property
     def mode(self) -> str:
+        """현재 리플레이 모드 (record/replay-verify/live-rerun)."""
         return self._mode
 
     @property
     def recorded(self) -> list[dict[str, Any]]:
+        """로드된 tool_wrap 이벤트 복사본 (호출자가 내부 리스트를 직접 건드리지 못하게)."""
         return list(self._recorded)
 
     def match(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -114,4 +127,5 @@ class ReplayEngine:
         return iter(self._recorded)
 
     def __len__(self) -> int:
+        """로드된 tool_wrap 이벤트 개수."""
         return len(self._recorded)
