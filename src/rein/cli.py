@@ -7,10 +7,10 @@
 - report:    정적 report.html 렌더
 """
 
-from __future__ import annotations
-
 import warnings
+from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
 import typer
 import yaml
@@ -77,24 +77,31 @@ def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
     return max(matched, key=lambda v: _VERDICT_PRIORITY.get(v, 0))
 
 
-# TODO(현준/가희): §4 명세 대비 시그니처부터 어긋남 — 스펙은 `rein seed <run.jsonl>`로
-# 이미 녹화된 로그를 "검증"(schema + critical outcome 0건)만 하고 golden_run.jsonl로
-# 지정하는 건데, 지금은 입력 로그 인자 자체가 없다. 본문도 아직 NotImplementedError.
+class ReplayMode(StrEnum):
+    verify = "verify"
+    live = "live"
+
+
 @app.command()
-def seed(output: str = typer.Option("golden_run.jsonl", "-o", "--output")):
-    """정상 시나리오를 녹화해 골든 코퍼스를 만든다 (강력 권장, 필수 아님)."""
+def seed(
+    run_log: Annotated[
+        str, typer.Argument(help="검증할 run.jsonl 경로 (Harness(record=...)로 녹화됨)")
+    ],
+):
+    """스키마 + critical outcome 0건을 검증한 뒤 golden_run.jsonl로 지정한다."""
     raise NotImplementedError
 
 
 @app.command()
 def replay(
-    log: str = typer.Argument(..., help="녹화된 JSONL 파일 경로"),  # noqa: B008
-    rules: list[str] | None = typer.Option(  # noqa: B008
-        None, "--rules", help="규칙 YAML 파일 (여러 개 가능)"
-    ),
-    # 기본값 verify
-    mode: str = typer.Option("verify", "--mode", help="verify(기본) | live"),  # noqa: B008
-    compare: bool = typer.Option(False, "--compare", help="가드레일 off/on A/B 비교"),  # noqa: B008
+    log: str,
+    rules: Annotated[
+        list[str] | None, typer.Option("--rules", help="적용할 rules.yaml (반복 지정 가능)")
+    ] = None,
+    mode: Annotated[
+        ReplayMode, typer.Option("--mode", help="verify=replay-verify(기본), live=live-rerun")
+    ] = ReplayMode.verify,
+    compare: Annotated[bool, typer.Option("--compare", help="가드레일 off/on A/B 비교")] = False,
 ):
     """녹화된 JSONL을 결정론적으로 재생한다 (record/replay-verify/live-rerun).
 
@@ -102,25 +109,20 @@ def replay(
     (인터셉터)이 NotImplementedError라 재실행할 라이브 호출 소스 자체가 없다. 지금은
     verify와 동일하게 로그만 읽어서 보여주고 §6 경고만 추가로 찍는다.
     """
-    # 잘못된 mode 는 exit 1 실행
-    if mode not in ("verify", "live"):
-        typer.echo(f"오류: --mode는 verify 또는 live여야 합니다. (입력: {mode!r})", err=True)
-        raise typer.Exit(1)
-
     log_path = Path(log)
     if not log_path.exists():
         typer.echo(f"오류: {log} 파일이 없습니다.", err=True)
         raise typer.Exit(1)
 
     # --mode live : live-rerun, 정직한 한계
-    if mode == "live":
+    if mode == ReplayMode.live:
         typer.echo(
             "[경고] live-rerun 모드: 정직한 한계 - "
             "깨끗한 정량 A/B는 첫 개입 지점까지만 성립합니다. (CLAUDE.md §6)",
             err=True,
         )
-    # --mode verify`(기본)는 replay-verify
-    engine_mode = "replay-verify" if mode == "verify" else "live-rerun"
+    # --mode verify(기본)는 replay-verify, live는 live-rerun
+    engine_mode = "replay-verify" if mode == ReplayMode.verify else "live-rerun"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # CLI에서 이미 출력
         try:
@@ -194,26 +196,30 @@ def _print_compare(events: list[dict], rules_paths: list[str]) -> None:
     console.print(f"\n총 {len(events)}개 이벤트 중 [red]{changed_count}개[/red] 판정 변경")
 
 
-# TODO(가희): §4 명세 대비 시그니처에 --golden, --dry-run 옵션이 빠져 있음.
-# 본문(featurize → 후보 합성 → 회귀 검증, §7 계층적 빔서치 K=8/depth=3)은
-# rules/__init__.py가 빈 스텁이라 아직 못 만듦 — featurizer(sqlglot) 먼저 필요.
 @app.command(name="rule-from")
 def rule_from(
     log: str,
-    event: str = typer.Option(..., "--event", help="예: evt_0042"),
-    output: str = typer.Option("rules.yaml", "-o", "--output"),
+    event: Annotated[str, typer.Option("--event", help="예: evt_0042")],
+    golden: Annotated[
+        str | None,
+        typer.Option("--golden", help="없으면 §7 콜드 스타트 안전장치 ②(합성 음성)를 사용"),
+    ] = None,
+    output: Annotated[str, typer.Option("-o", "--output")] = "rules.yaml",
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="후보 규칙과 회귀 매트릭스만 출력, 파일에 쓰지 않음")
+    ] = False,
 ):
     """실패 이벤트로부터 후보 규칙을 합성하고 회귀 검증 후 동결한다."""
     raise NotImplementedError
 
 
-# TODO(가희/세림): §4 명세는 --rules를 필수로 두는데(부분 리포트 모드 없음) 시그니처에
-# 아예 없음. rule-from이 없어 회귀 매트릭스 재료(blocks/regressions)도 아직 못 만든다 —
-# rule-from 먼저 구현된 뒤에야 §11의 4요소(타임라인/지표/후보 회귀 표/채택 규칙 매트릭스) 착수 가능.
 @app.command()
 def report(
     log: str,
-    output: str = typer.Option("report.html", "-o", "--output"),
+    rules: Annotated[
+        str, typer.Option("--rules", help="필수 — 후보/채택 규칙 회귀 매트릭스 렌더용")
+    ],
+    output: Annotated[str, typer.Option("-o", "--output")] = "report.html",
 ):
     """분기 타임라인/지표/후보 회귀 표/규칙 회귀 매트릭스를 담은 정적 HTML을 만든다."""
     raise NotImplementedError

@@ -60,11 +60,13 @@ def test_replay_missing_file_exits_1(tmp_path):
     assert result.exit_code == 1
 
 
-def test_replay_invalid_mode_exits_1(tmp_path):
+def test_replay_invalid_mode_rejected(tmp_path):
+    """--mode는 ReplayMode(verify/live)로 타입돼 있어 잘못된 값은 typer/click이
+    함수 본문 진입 전에 거른다 (exit code 2 = click UsageError)."""
     log = tmp_path / "run.jsonl"
     log.touch()
     result = runner.invoke(app, ["replay", str(log), "--mode", "invalid"])
-    assert result.exit_code == 1
+    assert result.exit_code == 2
 
 
 # ── --mode live ───────────────────────────────────────────────────────────────

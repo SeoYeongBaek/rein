@@ -1,10 +1,15 @@
 name: CI
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -15,12 +20,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Lint (ruff)
+      - name: Lint (ruff check)
         run: ruff check .
 
-      - name: Test (pytest)
-        run: pytest --cov
+      - name: Format check (ruff format)
+        run: ruff format --check .
+
+      - name: Test with coverage
+        run: pytest --cov=src/rein --cov-report=term-missing
