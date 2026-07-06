@@ -24,5 +24,6 @@ class Denied(GuardrailVerdictError):
 class RetryRequested(GuardrailVerdictError):
     """retry 판정. 재시도 정책은 하네스가 구현하지 않고 호출자에 위임한다(§4)."""
 
+
 class ApprovalRequired(GuardrailVerdictError):
     """approve 판정. 승인 UI/콜백은 하네스가 구현하지 않고 호출자에 위임한다(§4)."""

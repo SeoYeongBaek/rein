@@ -13,13 +13,12 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-
-from typing import Any, Dict, Tuple, TypeVar
+from typing import Any, TypeVar
 
 from rein.adapters import is_recognized_adapter
 from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
+from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
 from rein.guardrails.verdict import Verdict
-from rein.guardrails.exceptions import Denied, RetryRequested, ApprovalRequired
 
 F = TypeVar("F", bound=Callable)
 
@@ -161,7 +160,7 @@ class Harness:
         pipeline = self._sealed_pipeline()  # _activate() 완료 후에만 유효.
 
         # ① 검사: 첫 non-allow 승리(§5).
-        for stage_name, stage_fn in pipeline:
+        for _stage_name, stage_fn in pipeline:
             verdict, rule_id, rationale, _ = stage_fn(tool_call, ctx)
             if verdict != Verdict.ALLOW:
                 # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
@@ -219,7 +218,7 @@ class Harness:
         return pipeline
 
 
-    def _record_tool_wrap_event(self, event: Dict[str, Any]) -> None:
+    def _record_tool_wrap_event(self, event: dict[str, Any]) -> None:
         """tool_wrap 이벤트 기록. 본 PR에서는 최소 더미 (no-op).
 
         §9 스키마상 source=tool_wrap, seq=단일 순번 카운터, verdict 등.
@@ -232,16 +231,24 @@ class Harness:
 
 
     # --- 기본 스테이지 더미 구현체 (반환값: Verdict, rule_id, rationale, evt_id) ---
-    def _default_schema_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_schema_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_permission_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_permission_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_budget_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_budget_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
-    def _default_safety_check(self, tool_call: Dict[str, Any], ctx: Any) -> Tuple[Verdict, str, str, str]:
+    def _default_safety_check(
+        self, tool_call: dict[str, Any], ctx: Any
+    ) -> tuple[Verdict, str, str, str]:
         return Verdict.ALLOW, "", "", ""
 
     def __enter__(self) -> Harness:
