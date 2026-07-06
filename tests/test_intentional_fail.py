@@ -1,4 +1,4 @@
-#  pytest tests/test_intentional_fail.py -v
+#  pytest tests/test_intentional_fail.py -v 포맷
 import pytest
 
 from rein.guardrails.verdict import Verdict
