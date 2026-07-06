@@ -4,10 +4,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
-from rein.cli import app
+from rein.cli import _verdict_from_rules, app
 
 runner = CliRunner()
 
@@ -234,6 +235,30 @@ def test_compare_conflicting_rules_pick_most_restrictive(tmp_path):
     result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
     assert result.exit_code == 0
     assert "deny" in result.output
+
+
+def test_verdict_from_rules_rejects_invalid_then_value():
+    """then 값이 §5 허용 집합(allow/retry/approve/deny)에 없으면 조용히 allow
+    취급하지 않고 ValueError를 던진다 (오타로 인한 무음 무력화 방지)."""
+    evt = _tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})
+    rules = [{"id": "r1", "when": {"tool": "execute_sql"}, "then": "denied"}]  # 오타
+
+    with pytest.raises(ValueError, match="denied"):
+        _verdict_from_rules(evt, rules)
+
+
+def test_compare_invalid_then_value_exits_1(tmp_path):
+    """잘못된 규칙 파일(then 오타)이 주어지면 CLI가 예외로 죽지 않고 종료 코드 1로
+    안전하게 종료한다."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(log, [_tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})])
+
+    rules = tmp_path / "rules.yaml"
+    _write_rule(rules, tool="execute_sql", then="denied")  # 오타 (deny가 아님)
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 1
+    assert "denied" in result.output
 
 
 def test_compare_counts_changed_events(tmp_path):
