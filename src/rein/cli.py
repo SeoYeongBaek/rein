@@ -105,9 +105,15 @@ def replay(
 ):
     """녹화된 JSONL을 결정론적으로 재생한다 (record/replay-verify/live-rerun).
 
-    TODO(현준): --mode live가 진짜 "실제 도구 재실행"은 아직 안 함 — Harness.register_tool
-    (인터셉터)이 NotImplementedError라 재실행할 라이브 호출 소스 자체가 없다. 지금은
-    verify와 동일하게 로그만 읽어서 보여주고 §6 경고만 추가로 찍는다.
+    TODO(서영/현준, 스펙 갭): --mode live는 "단순 미배선"이 아니라 지금 시그니처로는
+    구조적으로 불가능하다 — 이 명령은 run.jsonl 경로만 받고, 실제 도구 함수(사용자가
+    @h.register_tool로 감싼 파이썬 함수)는 사용자 애플리케이션 코드에 있지 로그에는
+    없다. register_tool 자체는 구현됐지만, 그건 "사용자가 자기 스크립트를 다시 실행할
+    때 그 안의 Harness(mode="live-rerun")가 ReplayEngine.match()를 호출"하는 경로이지,
+    rein replay <log> CLI 단독 호출로 재실행할 대상을 찾는 경로가 아니다. CLAUDE.md
+    §4/§6 어디에도 CLI가 사용자 스크립트를 어떻게 다시 실행시키는지 정의가 없음 —
+    구현 전에 이 스펙 갭부터 확정 필요. 지금은 verify와 동일하게 로그만 읽어서
+    보여주고 §6 경고만 추가로 찍는다.
     """
     log_path = Path(log)
     if not log_path.exists():
