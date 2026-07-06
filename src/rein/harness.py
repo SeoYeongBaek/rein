@@ -22,9 +22,12 @@ from rein.guardrails.verdict import Verdict
 
 F = TypeVar("F", bound=Callable)
 
+
 class Context:
     """도구 호출 컨텍스트 (이후 예산 누적, 에이전트 역할 등을 저장)"""
+
     pass
+
 
 # Verdict 문자열 → 예외 클래스 매핑. §4 비-silent 차단 계약을 한 자리에 둔다.
 _VERDICT_TO_EXCEPTION: dict[str, Callable[..., Exception]] = {
@@ -40,6 +43,7 @@ def _enforce(verdict: Verdict, rule_id: str, rationale: str, evt_id: str) -> Non
         return
     exc_cls = _VERDICT_TO_EXCEPTION[str(verdict)]
     raise exc_cls(str(verdict), rule_id, rationale, evt_id)
+
 
 class Harness:
     def __init__(
@@ -59,7 +63,7 @@ class Harness:
         self.config = config
         self._observed_client: Any | None = None  # §3: 기본 비활성
         self._custom_stages: dict[str, StageFn] = {}
-        
+
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
         self._stage_order: list[str] = load_stage_order(config)
         self._resolved_stage_order: list[str] | None = None
@@ -92,7 +96,7 @@ class Harness:
         """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다."""
         if inspect.iscoroutinefunction(func):
             raise TypeError("M1은 동기 함수만 지원합니다")
-            
+
         # 도구가 실행되기 전 가장 이른 시점에 파이프라인 봉인(seal) 및 확정
         self._activate()
 
@@ -113,16 +117,16 @@ class Harness:
             except TypeError:
                 # 바인딩 실패(잘못된 호출)는 가드레일에 맡기지 말고 그대로 전파 —
                 # _intercept는 정상 호출을 모델링하므로 여기선 합치기만 시도
-                return dict(kwargs)    
-        
+                return dict(kwargs)
+
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             ctx = None  # 추후 Context() 객체 연동 시 수정
-            bound = _bound_args(args, kwargs)            
+            bound = _bound_args(args, kwargs)
             tool_call = {"name": func.__name__, "args": bound}
-            
+
             # 검사 + 실행 진행
             return self._intercept(tool_call, lambda: func(*args, **kwargs), ctx)
-            
+
         return wrapper  # type: ignore
 
     def observe_model(self, client: Any) -> None:
@@ -140,7 +144,7 @@ class Harness:
                 "extract_tool_calls(response) 메서드도 구현하지 않았습니다."
             )
         self._observed_client = client
-    
+
     def _intercept(
         self,
         tool_call: dict[str, Any],
@@ -169,12 +173,14 @@ class Harness:
 
         # ② 집행: 통과한 경우에만 기록 + 실행.
         #    §6 매칭 키 seq는 _record_tool_wrap_event 내부에서 부여한다.
-        self._record_tool_wrap_event({
-            "tool_name": tool_call["name"],
-            "args": tool_call.get("args", {}),
-            "verdict": "allow",
-            "ctx": ctx,
-        })
+        self._record_tool_wrap_event(
+            {
+                "tool_name": tool_call["name"],
+                "args": tool_call.get("args", {}),
+                "verdict": "allow",
+                "ctx": ctx,
+            }
+        )
         return do_call()
 
     def _observe(self, response_or_event: Any) -> None:
@@ -217,7 +223,6 @@ class Harness:
             pipeline.append((name, fn))
         return pipeline
 
-
     def _record_tool_wrap_event(self, event: dict[str, Any]) -> None:
         """tool_wrap 이벤트 기록. 본 PR에서는 최소 더미 (no-op).
 
@@ -228,7 +233,6 @@ class Harness:
         """
         # TODO(junn1104, #6 JSONL 저장소 PR): append + seq 카운터 부여.
         pass
-
 
     # --- 기본 스테이지 더미 구현체 (반환값: Verdict, rule_id, rationale, evt_id) ---
     def _default_schema_check(

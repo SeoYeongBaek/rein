@@ -1,10 +1,11 @@
-import pytest
-from unittest.mock import patch
 from typing import Any
+from unittest.mock import patch
 
-from rein.harness import Harness
+import pytest
+
+from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
 from rein.guardrails.verdict import Verdict
-from rein.guardrails.exceptions import Denied, RetryRequested, ApprovalRequired
+from rein.harness import Harness
 
 # --- Fixtures ---
 
@@ -90,6 +91,7 @@ def test_intercept_short_circuit_on_deny(mock_resolve, harness):
     error_msg = str(exc_info.value)
     assert "rule_X" in error_msg
     assert "위험한 동작 감지" in error_msg
+
 
 def test_enforce_exception_mapping():
     """내부 함수 _enforce가 Verdict 종류에 맞는 올바른 예외 클래스를 던지는지 확인"""
