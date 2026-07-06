@@ -8,7 +8,6 @@
 """
 
 import warnings
-from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -91,11 +90,6 @@ def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
     return max(matched, key=lambda v: _VERDICT_PRIORITY[v])
 
 
-class ReplayMode(StrEnum):
-    verify = "verify"
-    live = "live"
-
-
 @app.command()
 def seed(
     run_log: Annotated[
@@ -112,44 +106,25 @@ def replay(
     rules: Annotated[
         list[str] | None, typer.Option("--rules", help="적용할 rules.yaml (반복 지정 가능)")
     ] = None,
-    mode: Annotated[
-        ReplayMode, typer.Option("--mode", help="verify=replay-verify(기본), live=live-rerun")
-    ] = ReplayMode.verify,
     compare: Annotated[bool, typer.Option("--compare", help="가드레일 off/on A/B 비교")] = False,
 ):
-    """녹화된 JSONL을 결정론적으로 재생한다 (record/replay-verify/live-rerun).
+    """녹화된 JSONL을 replay-verify로 재생한다 (CLAUDE.md §4/§6).
 
-    TODO(서영/현준, 스펙 갭): --mode live는 "단순 미배선"이 아니라 지금 시그니처로는
-    구조적으로 불가능하다 — 이 명령은 run.jsonl 경로만 받고, 실제 도구 함수(사용자가
-    @h.register_tool로 감싼 파이썬 함수)는 사용자 애플리케이션 코드에 있지 로그에는
-    없다. register_tool 자체는 구현됐지만, 그건 "사용자가 자기 스크립트를 다시 실행할
-    때 그 안의 Harness(mode="live-rerun")가 ReplayEngine.match()를 호출"하는 경로이지,
-    rein replay <log> CLI 단독 호출로 재실행할 대상을 찾는 경로가 아니다. CLAUDE.md
-    §4/§6 어디에도 CLI가 사용자 스크립트를 어떻게 다시 실행시키는지 정의가 없음 —
-    구현 전에 이 스펙 갭부터 확정 필요. 지금은 verify와 동일하게 로그만 읽어서
-    보여주고 §6 경고만 추가로 찍는다.
+    live-rerun은 이 명령의 옵션이 아니다. 실제 도구 함수는 사용자
+    프로세스 안에만 존재해 로그 파일만 받는 CLI가 대신 실행할 수 없다.
+    live-rerun이 필요하면 사용자 스크립트 안에서
+    Harness(mode="live-rerun", replay_from=log)로 직접 트리거한다.
     """
     log_path = Path(log)
     if not log_path.exists():
         typer.echo(f"오류: {log} 파일이 없습니다.", err=True)
         raise typer.Exit(1)
 
-    # --mode live : live-rerun, 정직한 한계
-    if mode == ReplayMode.live:
-        typer.echo(
-            "[경고] live-rerun 모드: 정직한 한계 - "
-            "깨끗한 정량 A/B는 첫 개입 지점까지만 성립합니다. (CLAUDE.md §6)",
-            err=True,
-        )
-    # --mode verify(기본)는 replay-verify, live는 live-rerun
-    engine_mode = "replay-verify" if mode == ReplayMode.verify else "live-rerun"
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # CLI에서 이미 출력
-        try:
-            engine = ReplayEngine(log_path, mode=engine_mode)
-        except ReplayMismatchError as e:
-            typer.echo(f"오류: {e}", err=True)
-            raise typer.Exit(1) from None
+    try:
+        engine = ReplayEngine(log_path, mode="replay-verify")
+    except ReplayMismatchError as e:
+        typer.echo(f"오류: {e}", err=True)
+        raise typer.Exit(1) from None
 
     events = list(engine)
     if not events:

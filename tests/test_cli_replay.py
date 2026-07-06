@@ -74,24 +74,14 @@ def test_replay_missing_file_exits_1(tmp_path):
     assert result.exit_code == 1
 
 
-def test_replay_invalid_mode_rejected(tmp_path):
-    """--mode는 ReplayMode(verify/live)로 타입돼 있어 잘못된 값은 typer/click이
-    함수 본문 진입 전에 거른다 (exit code 2 = click UsageError)."""
+def test_replay_mode_option_removed(tmp_path):
+    """live-rerun은 CLI 옵션이 아니다 — --mode 자체가 없는 옵션으로 거부된다
+    (exit code 2 = click UsageError). live-rerun은 Harness(mode="live-rerun",
+    replay_from=...)로 사용자 스크립트 안에서 직접 트리거한다 (CLAUDE.md §4/§6)."""
     log = tmp_path / "run.jsonl"
     log.touch()
-    result = runner.invoke(app, ["replay", str(log), "--mode", "invalid"])
-    assert result.exit_code == 2
-
-
-# ── --mode live ───────────────────────────────────────────────────────────────
-
-
-def test_replay_live_mode_prints_warning(tmp_path):
-    log = tmp_path / "run.jsonl"
-    _write_jsonl(log, [_tool_wrap(0, "execute_sql", {"query": "SELECT 1"})])
     result = runner.invoke(app, ["replay", str(log), "--mode", "live"])
-    assert result.exit_code == 0
-    assert "정직한 한계" in result.output
+    assert result.exit_code == 2
 
 
 # ── --compare ─────────────────────────────────────────────────────────────────
