@@ -7,17 +7,11 @@
 - report:    정적 report.html 렌더
 """
 
-from enum import StrEnum
 from typing import Annotated
 
 import typer
 
 app = typer.Typer(name="rein", help="Agent = Model + Harness")
-
-
-class ReplayMode(StrEnum):
-    verify = "verify"
-    live = "live"
 
 
 @app.command()
@@ -36,12 +30,15 @@ def replay(
     rules: Annotated[
         list[str] | None, typer.Option("--rules", help="적용할 rules.yaml (반복 지정 가능)")
     ] = None,
-    mode: Annotated[
-        ReplayMode, typer.Option("--mode", help="verify=replay-verify(기본), live=live-rerun")
-    ] = ReplayMode.verify,
     compare: Annotated[bool, typer.Option("--compare", help="가드레일 off/on A/B 비교")] = False,
 ):
-    """녹화된 JSONL을 결정론적으로 재생한다 (record/replay-verify/live-rerun)."""
+    """녹화된 JSONL을 replay-verify로 재생한다 (CLAUDE.md §4/§6).
+
+    live-rerun은 이 명령의 옵션이 아니다. 실제 도구 함수는 사용자
+    프로세스 안에만 존재해 로그 파일만 받는 CLI가 대신 실행할 수 없다.
+    live-rerun이 필요하면 사용자 스크립트 안에서
+    Harness(mode="live-rerun", replay_from=log)로 직접 트리거한다.
+    """
     raise NotImplementedError
 
 
