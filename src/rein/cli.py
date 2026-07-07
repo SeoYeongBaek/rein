@@ -7,11 +7,87 @@
 - report:    정적 report.html 렌더
 """
 
+import warnings
+from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
+from rich.console import Console
+from rich.table import Table
+
+from rein.replay.engine import ReplayEngine, ReplayMismatchError
 
 app = typer.Typer(name="rein", help="Agent = Model + Harness")
+console = Console()
+
+
+# §5: deny > approve > retry > allow
+_VERDICT_PRIORITY = {"allow": 0, "retry": 1, "approve": 2, "deny": 3}
+
+
+def _load_rules(rules_paths: list[str]) -> list[dict]:
+    """rules.yaml 여러 개를 평탄화. 파일 하나에 `---`로 구분된 여러 규칙 문서도 지원
+    (§4 rule-from의 append 동작을 받아내려면 한 파일에 규칙이 여러 개 쌓일 수 있음).
+
+    TODO(가희): rule-from이 실제로 append할 때 멀티 문서(`---`)로 쓸지 `rules:` 리스트로
+    쓸지 아직 미확정 — rule-from 구현 시 포맷이 확정되면 이 로더도 맞춰서 바꿀 것.
+    """
+    rules = []
+    for path in rules_paths:
+        text = Path(path).read_text(encoding="utf-8")
+        for doc in yaml.safe_load_all(text):
+            if doc is None:
+                continue  # `---`가 만드는 빈 문서 — 정상 케이스, 조용히 스킵
+            if "rule" not in doc:
+                warnings.warn(
+                    f"{path}: 'rule' 키가 없는 YAML 문서를 건너뜁니다 "
+                    f"(최상위 키: {sorted(doc.keys())})",
+                    stacklevel=2,
+                )
+                continue
+            rules.append(doc["rule"])
+    return rules
+
+
+def _rule_matches(rule: dict, evt: dict) -> bool:
+    """when.tool + scope.agent.role 매칭.
+
+    TODO(가희): when.features.class(DDL_DESTRUCTIVE 등) 매칭은 §7 featurizer
+    (sqlglot)가 있어야 하는데 rules/__init__.py가 아직 빈 스텁이라 보류.
+    """
+    when = rule.get("when", {})
+    if when.get("tool") and when.get("tool") != evt.get("tool_name"):
+        return False
+
+    scope = rule.get("scope") or {}
+    scoped_role = scope.get("agent.role")
+    if scoped_role and scoped_role != evt.get("context", {}).get("agent_role"):
+        return False
+
+    return True
+
+
+def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
+    """규칙 적용 후 판정. 매칭된 규칙이 여럿이면 §5 충돌 해결 우선순위
+    (deny > approve > retry > allow)로 가장 제한적인 판정을 고른다.
+
+    rules는 미리 _load_rules로 로드된 규칙 리스트 — 이벤트마다 파일을 다시
+    읽지 않도록 호출자(_print_compare)가 루프 밖에서 한 번만 로드해서 넘긴다.
+
+    TODO: §5 가드레일 4단계(schema/permission/budget/safety) 자체는 아직 없어서
+    여기선 rules.yaml 매칭만 수행 — 가드레일 엔진 연결 후 교체.
+    """
+    matched = [rule.get("then", "allow") for rule in rules if _rule_matches(rule, evt)]
+    if not matched:
+        return "allow"
+    for verdict in matched:
+        if verdict not in _VERDICT_PRIORITY:
+            raise ValueError(
+                f"규칙의 then 값이 잘못되었습니다: {verdict!r} "
+                f"(허용값: {sorted(_VERDICT_PRIORITY)})"
+            )
+    return max(matched, key=lambda v: _VERDICT_PRIORITY[v])
 
 
 @app.command()
@@ -39,7 +115,89 @@ def replay(
     live-rerun이 필요하면 사용자 스크립트 안에서
     Harness(mode="live-rerun", replay_from=log)로 직접 트리거한다.
     """
-    raise NotImplementedError
+    log_path = Path(log)
+    if not log_path.exists():
+        typer.echo(f"오류: {log} 파일이 없습니다.", err=True)
+        raise typer.Exit(1)
+
+    try:
+        engine = ReplayEngine(log_path, mode="replay-verify")
+    except ReplayMismatchError as e:
+        typer.echo(f"오류: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    events = list(engine)
+    if not events:
+        typer.echo("tool_wrap 이벤트가 없습니다.")
+        return
+
+    if compare:
+        try:
+            _print_compare(events, rules or [])
+        except ValueError as e:
+            typer.echo(f"오류: {e}", err=True)
+            raise typer.Exit(1) from None
+    else:
+        _print_events(events)
+
+
+# --compare 없이 replay 호출 시: 기록된 이벤트를 seq/tool_name/verdict/severity/detail로 나열
+def _print_events(events: list[dict]) -> None:
+    table = Table(title="replay 결과", show_lines=False)
+    table.add_column("seq", style="dim", width=5)
+    table.add_column("tool_name")
+    table.add_column("verdict")
+    table.add_column("severity")
+    table.add_column("detail")
+
+    for evt in events:
+        outcome = evt.get("outcome") or {}
+        severity = outcome.get("severity", "-")
+        severity_style = {"critical": "red", "warning": "yellow", "info": "green"}.get(severity, "")
+        # 스타일이 없는(미지정) severity에 빈 태그 "[]...[/]" 를 씌우면 rich가
+        # MarkupError를 던진다 — 스타일이 있을 때만 태그로 감싼다.
+        severity_text = (
+            f"[{severity_style}]{severity}[/{severity_style}]" if severity_style else severity
+        )
+        table.add_row(
+            str(evt.get("seq", "-")),
+            evt.get("tool_name", "-"),
+            evt.get("verdict", "-"),
+            severity_text,
+            outcome.get("detail", "-"),
+        )
+
+    console.print(table)
+
+
+# --compare: recorded(§9 verdict, off) vs with_rules(_verdict_from_rules, on)를 나란히 비교
+def _print_compare(events: list[dict], rules_paths: list[str]) -> None:
+    table = Table(title="가드레일 A/B 비교 (off → on)", show_lines=False)
+    table.add_column("seq", style="dim", width=5)
+    table.add_column("tool_name")
+    table.add_column("recorded (off)", style="dim")
+    table.add_column("with_rules (on)")
+    table.add_column("changed", width=8)
+
+    rules = _load_rules(rules_paths)  # 루프 밖에서 한 번만 로드 (이벤트마다 재파싱하지 않음)
+    changed_count = 0
+    for evt in events:
+        recorded = evt.get("verdict", "allow")
+        with_rules = _verdict_from_rules(evt, rules)
+        changed = recorded != with_rules
+        if changed:
+            changed_count += 1
+
+        table.add_row(
+            str(evt.get("seq", "-")),
+            evt.get("tool_name", "-"),
+            recorded,
+            f"[red]{with_rules}[/red]" if changed else with_rules,
+            "[red]CHANGED[/red]" if changed else "-",
+        )
+
+    console.print(table)
+    console.print(f"\n총 {len(events)}개 이벤트 중 [red]{changed_count}개[/red] 판정 변경")
 
 
 @app.command(name="rule-from")
