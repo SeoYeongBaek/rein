@@ -30,10 +30,10 @@ class Context:
 
 
 # Verdict 문자열 → 예외 클래스 매핑. §4 비-silent 차단 계약을 한 자리에 둔다.
-_VERDICT_TO_EXCEPTION: dict[str, Callable[..., Exception]] = {
-    "deny": Denied,
-    "retry": RetryRequested,
-    "approve": ApprovalRequired,
+_VERDICT_TO_EXCEPTION: dict[Verdict, Callable[..., Exception]] = {
+    Verdict.DENY: Denied,
+    Verdict.APPROVE: ApprovalRequired,
+    Verdict.RETRY: RetryRequested,
 }
 
 
@@ -41,7 +41,7 @@ def _enforce(verdict: Verdict, rule_id: str, rationale: str, evt_id: str) -> Non
     """non-allow 판정을 예외로 환원. 조용한 차단 금지(§5 fail-closed)."""
     if verdict == Verdict.ALLOW:
         return
-    exc_cls = _VERDICT_TO_EXCEPTION[str(verdict)]
+    exc_cls = _VERDICT_TO_EXCEPTION[verdict]
     raise exc_cls(str(verdict), rule_id, rationale, evt_id)
 
 
@@ -165,10 +165,10 @@ class Harness:
 
         # ① 검사: 첫 non-allow 승리(§5).
         for _stage_name, stage_fn in pipeline:
-            verdict, rule_id, rationale, _ = stage_fn(tool_call, ctx)
+            verdict, rule_id, rationale, evt_id = stage_fn(tool_call, ctx)
             if verdict != Verdict.ALLOW:
                 # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
-                _enforce(verdict, rule_id, rationale, evt_id="")
+                _enforce(verdict, rule_id, rationale, evt_id=evt_id)
                 return  # type: ignore[unreachable]
 
         # ② 집행: 통과한 경우에만 기록 + 실행.
