@@ -58,6 +58,23 @@ def test_record_mode_does_not_load_events(tmp_path):
     assert len(engine) == 0
 
 
+# ── seq/position 정합성 (§6 position 매칭 전제) ─────────────────────────────────
+
+
+def test_seq_mismatch_with_index_hard_error(tmp_path):
+    """tool_wrap 이벤트의 seq가 파일 내 순서(index)와 어긋나면 로드 시점에 즉시 에러."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(
+        log,
+        [
+            _tool_wrap(0, "execute_sql", {"query": "SELECT 1"}),
+            _tool_wrap(5, "delete_file", {"path": "/tmp/x"}),  # index=1인데 seq=5
+        ],
+    )
+    with pytest.raises(ReplayMismatchError, match="seq 불일치"):
+        ReplayEngine(log, mode="replay-verify")
+
+
 # ── replay-verify 모드 ───────────────────────────────────────────────────────
 
 
