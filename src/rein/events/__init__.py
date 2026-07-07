@@ -6,11 +6,13 @@
          않는다 (scope guard §4 "5줄 통합" 정신).
     [D2] seq 카운터: EventStore 인스턴스 필드. tool_wrap 기록마다 +1.
          model_client 이벤트는 seq 미부여 (§9 확정, §6 매칭 키 제외).
+         ※ self._seq는 단일 카운터(evt ID 발급 포함) — record_model_client도
+           evt ID 고유성 확보를 위해 증가시키지만, seq 필드값은 null로
+           박는다 (§9 준수).
     [D3] evt ID (tool_wrap): "evt_" + seq zero-pad 4자리.
-    [D]  evt ID (model_client): §9에 명시된 규칙이 없어, tool_wrap evt
-         ID("evt_NNNN")와 충돌하지 않게 "evt_mc_NNNN" 별도 카운터 +
-         prefix를 임시 채택. 후속 PR(replay engine)에서 model_client
-         식별 규칙이 확정되면 거기서 정렬.
+    [D]  evt ID (단일 카운터): tool_wrap / model_client / outcome 모든
+         라인이 동일한 self._seq 카운터에서 evt_NNNN을 발급받는다.
+         evt 필드는 항상 고유한 이벤트 식별자.
     [D4] outcome: 호출자가 status/severity/side_effect/detail을 명시.
          성공 시 record_ok(), 예외 시 record_error(exc) 헬퍼 제공.
          §7 분류 테이블 세부 severity refine은 후속 PR.
@@ -25,7 +27,6 @@ public 표면 노출 정책:
 """
 
 from rein.events.event_store import (
-    SCHEMA_VERSION,
     SEVERITY_CRITICAL,
     SEVERITY_INFO,
     SEVERITY_WARNING,
@@ -37,5 +38,4 @@ __all__ = [
     "SEVERITY_INFO",
     "SEVERITY_WARNING",
     "SEVERITY_CRITICAL",
-    "SCHEMA_VERSION",
 ]

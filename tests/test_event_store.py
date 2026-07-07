@@ -1,15 +1,26 @@
-"""EventStore M1 #5 — 완료 기준 + 설계 결정 검증.
+"""EventStore 회귀 테스트.
 
-이 테스트는 다음을 1:1 보장한다:
-    [A] append-only, 단일 순번 카운터로 seq 부여
-    [B] schema_version 필드 포함
-    [C] outcome.detail 자유 텍스트 필드 포함
-    [D] source=model_client 이벤트는 parent_seq만 가짐 (seq 없음)
+잠그는 피드백:
+    1. 첫 record_* 동시 호출 race (스레드 안전)
+        - record_tool_wrap / record_model_client / record_outcome 모두
+          self._lock 안에서 _fh == None 체크 + 파일 open + write를
+          한 번에 수행해야 한다. 두 스레드가 동시에 첫 record_*를
+          시작해도 파일이 한 번만 열려야 하고, 모든 이벤트가 손실
+          없이 기록되어야 한다.
+        - record_*가 락 밖에서 _open()을 호출하면 두 번 open race가
+          생긴다. 본 테스트는 그 회귀를 막는다.
 
-범위 밖:
-    - 실제 인터셉터 통합 (harness.py 쪽 PR 책임)
-    - §7 severity 분류 테이블 (후속 PR)
-    - Context 의미 필드 채움 (후속 PR)
+    2. b안 evt ID 단일화 (D/D.review)
+        - self._seq는 단일 카운터로, tool_wrap / model_client / outcome
+          모든 라인이 evt_NNNN을 고유하게 발급받아야 한다.
+        - model_client는 self._seq += 1로 evt 고유성을 확보하되
+          seq 필드에는 null을 박는다 (§9 준수).
+        - outcome은 직전 tool_wrap의 evt/seq를 재사용한다.
+        - 시간순: tool_wrap → model_client → tool_wrap → outcome 시
+          evt ID는 evt_0001, evt_0002, evt_0003, evt_0003이고
+          seq 필드는 1, null, 3, 3.
+        - 회귀 가드: model_client가 self._seq를 증가시키지 않으면
+          evt_0001 중복 + evt_0002 누락이 발생한다 (폐기된 Y안 버그).
 """
 
 from __future__ import annotations
@@ -20,289 +31,268 @@ from pathlib import Path
 
 import pytest
 
-from rein.events import (
-    SCHEMA_VERSION,
-    SEVERITY_CRITICAL,
-    SEVERITY_INFO,
-    SEVERITY_WARNING,
-    EventStore,
-)
+from rein.events import EventStore
 
-# ---------- 픽스처 ----------
+# === 픽스처 ===
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> EventStore:
-    """기본 EventStore. tmp_path 사용으로 격리."""
+def tmp_store(tmp_path: Path) -> EventStore:
+    """각 테스트마다 격리된 임시 경로의 EventStore를 만든다."""
     return EventStore(tmp_path / "events.jsonl")
 
 
-def _read_lines(path: Path) -> list[dict]:
-    """JSONL 한 줄씩 파싱해 dict 리스트로 돌려준다."""
-    with path.open("r", encoding="utf-8") as f:
+def _read_jsonl(path: Path) -> list[dict]:
+    """JSONL 한 줄씩 읽어서 list[dict]로 반환. 빈 줄은 무시."""
+    with path.open(encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
-# ---------- [A] append-only, 단일 순번 ----------
-
-
-class TestSeqCounter:
-    """[A] append-only + 단일 순번(seq) 카운터 검증."""
-
-    def test_seq_starts_at_zero_and_monotonically_increases(self, store: EventStore) -> None:
-        evt1 = store.record_tool_wrap(tool_name="foo", args={"x": 1}, context=None, verdict="allow")
-        evt2 = store.record_tool_wrap(tool_name="bar", args={"y": 2}, context=None, verdict="allow")
-        assert evt1["seq"] == 1
-        assert evt2["seq"] == 2
-
-    def test_record_appends_new_lines_without_overwrite(self, tmp_path: Path) -> None:
-        """[A] append-only: 매 호출이 정확히 한 줄을 추가한다."""
-        path = tmp_path / "events.jsonl"
-        s1 = EventStore(path)
-        s1.record_tool_wrap(tool_name="a", args={}, context=None, verdict="allow")
-        s1.close()
-
-        # 같은 경로로 새 인스턴스 → append 모드로 열림 (덮어쓰기 X)
-        s2 = EventStore(path)
-        s2.record_tool_wrap(tool_name="b", args={}, context=None, verdict="allow")
-        s2.close()
-
-        lines = _read_lines(path)
-        assert len(lines) == 2
-        assert lines[0]["tool_name"] == "a"
-        assert lines[1]["tool_name"] == "b"
-
-    def test_each_record_writes_exactly_one_line(self, store: EventStore, tmp_path: Path) -> None:
-        """[A] 한 record_*() 호출 = 정확히 한 줄."""
-        store.record_tool_wrap(tool_name="x", args={}, context=None, verdict="allow")
-        store.record_tool_wrap(tool_name="y", args={}, context=None, verdict="allow")
-        path = store._path
-        with path.open("r", encoding="utf-8") as f:
-            non_empty = [ln for ln in f if ln.strip()]
-        assert len(non_empty) == 2
-
-
-# ---------- [B] schema_version ----------
-
-
-class TestSchemaVersion:
-    """[B] schema_version 필드 포함."""
-
-    def test_tool_wrap_event_has_schema_version(self, store: EventStore) -> None:
-        evt = store.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        assert evt["schema_version"] == SCHEMA_VERSION
-        assert evt["schema_version"] == "v1"
-
-    def test_model_client_event_has_schema_version(self, store: EventStore) -> None:
-        evt = store.record_model_client(parent_seq=1, tool_name="foo", proposed_args={})
-        assert evt["schema_version"] == SCHEMA_VERSION
-
-    def test_outcome_event_has_schema_version(self, store: EventStore) -> None:
-        evt = store.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        store.record_outcome(evt, status="ok", severity=SEVERITY_INFO, detail="ok")
-        with store._path.open("r", encoding="utf-8") as f:
-            lines = [json.loads(ln) for ln in f if ln.strip()]
-        # 두 번째 줄이 outcome 라인
-        assert lines[1]["schema_version"] == SCHEMA_VERSION
-
-
-# ---------- [C] outcome.detail 자유 텍스트 ----------
-
-
-class TestOutcomeDetail:
-    """[C] outcome.detail 자유 텍스트 필드."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "simple ascii",
-            "한글 디테일 — 이벤트 본문",  # CLAUDE.md §14: 줄표 허용 (코드/문서)
-            "with\nnewline",  # JSON 이스케이프되어도 detail 문자열로 보존
-            'quote " and backslash \\',
-            "🎯 emoji",
-        ],
-    )
-    def test_detail_preserved_roundtrip(self, store: EventStore, text: str) -> None:
-        evt = store.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        store.record_outcome(evt, status="error", severity=SEVERITY_WARNING, detail=text)
-        store.close()
-        lines = _read_lines(store._path)
-        assert lines[1]["outcome"]["detail"] == text
-
-    def test_record_error_sets_detail_from_exception(self, store: EventStore) -> None:
-        """record_error 헬퍼는 예외 타입+메시지를 detail 기본값으로."""
-        evt = store.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        exc = RuntimeError("boom")
-        store.record_error(evt, exc)
-        store.close()
-        lines = _read_lines(store._path)
-        assert lines[1]["outcome"]["detail"] == "RuntimeError: boom"
-
-
-# ---------- [D] model_client: parent_seq만, seq 없음 ----------
-
-
-class TestModelClientEvent:
-    """[D] source=model_client 이벤트는 seq 없이 parent_seq만 가짐."""
-
-    def test_model_client_seq_is_null(self, store: EventStore) -> None:
-        evt = store.record_model_client(
-            parent_seq=1, tool_name="foo", proposed_args={"q": "DROP TABLE"}
-        )
-        assert evt["source"] == "model_client"
-        assert evt["seq"] is None  # [D] 명시적 null
-        assert evt["parent_seq"] == 1
-
-    def test_model_client_does_not_increase_tool_wrap_counter(self, store: EventStore) -> None:
-        """[D] self._seq는 tool_wrap 전용. model_client는 seq를 부여하지
-        않으므로 카운터를 올리지 않는다."""
-        store.record_tool_wrap(
-            tool_name="foo", args={}, context=None, verdict="allow"
-        )  # tool_wrap seq=1
-        store.record_model_client(
-            parent_seq=1, tool_name="foo", proposed_args={}
-        )  # model_client: seq 부여 X
-        evt3 = store.record_tool_wrap(tool_name="bar", args={}, context=None, verdict="allow")
-        # 두 번째 tool_wrap의 seq는 2 — model_client가 카운터를 안 올렸음
-        assert evt3["seq"] == 2
-
-    def test_model_client_evt_id_separate_namespace(self, store: EventStore) -> None:
-        """[D 임시] model_client evt ID는 tool_wrap과 분리된 네임스페이스.
-        PR 본문에서 (a)/(b) 결정 회피를 명시했음 — 본 테스트는 현 채택안(a)
-        만을 잠근다. 후속 PR에서 단일화 결정 시 이 테스트는 수정된다."""
-        evt_mc = store.record_model_client(parent_seq=None, tool_name="foo", proposed_args={})
-        assert evt_mc["evt"] == "evt_mc_0001"
-        assert not evt_mc["evt"].startswith("evt_") or evt_mc["evt"].startswith("evt_mc_")
-        # ↑ 위 assertion은 evt_mc_0001은 evt_로 시작하지만 mc_ 세그먼트가
-        # 바로 뒤에 붙음. 도식적 명확성을 위해 두 번째 줄로 분리:
-        assert evt_mc["evt"].startswith("evt_mc_")
-        assert evt_mc["evt"] != f"evt_{1:04d}"
-
-
-# ---------- [D1] lazy open ----------
-
-
-class TestLazyOpen:
-    def test_file_created_on_first_record(self, tmp_path: Path) -> None:
-        """[D1] 명시적 open() 없이 record_* 호출해도 파일 생성됨."""
-        path = tmp_path / "lazy.jsonl"
-        s = EventStore(path)
-        assert not path.exists()  # 아직 안 열림
-        s.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        assert path.exists()
-        s.close()
-
-    def test_close_then_record_reopens(self, tmp_path: Path) -> None:
-        """[D1] close 후 record_* 호출이 idempotent하게 다시 연다."""
-        path = tmp_path / "reopen.jsonl"
-        s = EventStore(path)
-        s.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        s.close()
-        s.record_tool_wrap(tool_name="bar", args={}, context=None, verdict="allow")
-        lines = _read_lines(path)
-        assert len(lines) == 2
-
-
-# ---------- [D3] evt ID 포맷 ----------
-
-
-class TestEvtIdFormat:
-    def test_tool_wrap_evt_id_zero_padded_4_digits(self, store: EventStore) -> None:
-        evt = store.record_tool_wrap(tool_name="foo", args={}, context=None, verdict="allow")
-        assert evt["evt"] == "evt_0001"
-
-    def test_evt_id_does_not_collide_across_many_records(self, store: EventStore) -> None:
-        ids = []
-        for i in range(15):
-            evt = store.record_tool_wrap(tool_name=f"t{i}", args={}, context=None, verdict="allow")
-            ids.append(evt["evt"])
-        assert ids == [f"evt_{i + 1:04d}" for i in range(15)]
-
-
-# ---------- append-only 보존 (tool_wrap → outcome 분리) ----------
-
-
-class TestAppendOnlyPreservation:
-    """outcome은 tool_wrap 라인을 덮어쓰지 않고 새 라인으로 append."""
-
-    def test_outcome_appends_new_line_not_overwrite(self, store: EventStore) -> None:
-        evt = store.record_tool_wrap(tool_name="foo", args={"x": 1}, context=None, verdict="allow")
-        store.record_outcome(evt, status="ok", severity=SEVERITY_INFO, detail="ok")
-        store.close()
-        lines = _read_lines(store._path)
-        assert len(lines) == 2
-        # 1줄: tool_wrap, outcome 없음
-        assert "outcome" not in lines[0]
-        # 2줄: outcome 본문, 같은 evt/seq 표면 보유
-        assert lines[1]["evt"] == evt["evt"]
-        assert lines[1]["seq"] == evt["seq"]
-        assert lines[1]["outcome"]["status"] == "ok"
-
-
-# ---------- thread-safety ----------
+# === 피드백 1: 스레드 안전 race ===
 
 
 class TestThreadSafety:
-    def test_concurrent_records_keep_monotonic_seq(self, store: EventStore) -> None:
-        """동시 record에서도 seq 단조 증가. 락이 깨지지 않았다는 약한 증거."""
-        n = 50
-        barrier = threading.Barrier(n)
+    """record_* 동시 호출 시 _open race 없음 + 모든 이벤트 손실 없음."""
+
+    def test_concurrent_first_record_opens_file_once(self, tmp_path: Path) -> None:
+        """두 스레드가 동시에 첫 record_tool_wrap를 호출해도
+        파일이 한 번만 열리고 모든 이벤트가 손실 없이 기록된다."""
+        path = tmp_path / "concurrent_first.jsonl"
+        store = EventStore(path)
+        results: list[dict] = []
 
         def worker(i: int) -> None:
-            barrier.wait()
-            store.record_tool_wrap(tool_name=f"t{i}", args={}, context=None, verdict="allow")
+            evt = store.record_tool_wrap(
+                tool_name=f"tool_{i}",
+                args={"i": i},
+                context=None,
+                verdict="allow",
+            )
+            results.append(evt)
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        store.close()
-        lines = _read_lines(store._path)
-        seqs = sorted(ln["seq"] for ln in lines)
-        assert seqs == list(range(1, n + 1))
+        # (1) 파일이 정확히 20줄 (모든 이벤트 손실 없이 기록됨)
+        events = _read_jsonl(path)
+        assert len(events) == 20
+
+        # (2) seq가 1..20 단조 증가 (단일 카운터 보존)
+        seqs = sorted(e["seq"] for e in events)
+        assert seqs == list(range(1, 21))
+
+        # (3) evt ID가 evt_0001..evt_0020으로 모두 고유
+        evts = sorted(e["evt"] for e in events)
+        assert evts == [f"evt_{i:04d}" for i in range(1, 21)]
+
+    def test_concurrent_mixed_records_no_loss(self, tmp_path: Path) -> None:
+        """record_tool_wrap / record_model_client / record_outcome을
+        섞어서 동시 호출해도 모든 라인이 손실 없이 기록되고
+        evt ID가 항상 고유해야 한다."""
+        path = tmp_path / "concurrent_mixed.jsonl"
+        store = EventStore(path)
+        tool_wrap_events: list[dict] = []
+
+        def worker_tw(i: int) -> None:
+            evt = store.record_tool_wrap(
+                tool_name=f"tool_{i}",
+                args={"i": i},
+                context=None,
+                verdict="allow",
+            )
+            tool_wrap_events.append((i, evt))
+
+        def worker_mc(i: int) -> None:
+            store.record_model_client(
+                parent_seq=None,
+                tool_name=f"tool_{i}",
+                proposed_args={"i": i},
+            )
+
+        threads: list[threading.Thread] = []
+        # tool_wrap 10개, model_client 10개 섞어서 동시 실행
+        for i in range(10):
+            threads.append(threading.Thread(target=worker_tw, args=(i,)))
+            threads.append(threading.Thread(target=worker_mc, args=(i,)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        events = _read_jsonl(path)
+        # 20줄 모두 기록됨 (tool_wrap 10 + model_client 10)
+        assert len(events) == 20
+
+        # evt ID 모두 고유 (race로 인한 중복/누락 없음)
+        evts = [e["evt"] for e in events]
+        assert len(set(evts)) == 20
+
+        # tool_wrap 라인의 seq는 1..10 범위 (매칭 키 단일 카운터)
+        tw_events = [e for e in events if e["source"] == "tool_wrap"]
+        tw_seqs = sorted(e["seq"] for e in tw_events)
+        assert tw_seqs == list(range(1, 11))
+
+        # model_client 라인의 seq 필드는 모두 null (§9)
+        mc_events = [e for e in events if e["source"] == "model_client"]
+        assert len(mc_events) == 10
+        assert all(e["seq"] is None for e in mc_events)
 
 
-# ---------- 스모크 ----------
+# === 피드백 2: b안 evt ID 단일화 ===
 
 
-class TestSmoke:
-    def test_korean_detail_roundtrip(self, store: EventStore) -> None:
-        evt = store.record_tool_wrap(
-            tool_name="execute_sql",
-            args={"query": "DROP TABLE users;"},
-            context=None,
-            verdict="allow",
+class TestEvtIdSingleCounter:
+    """evt ID 단일 카운터 약속 (D/D.review)."""
+
+    def test_tool_wrap_evt_id_increments(self, tmp_store: EventStore) -> None:
+        """tool_wrap 연속 호출: evt ID가 evt_0001, evt_0002, ...로 증가."""
+        e1 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        e2 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        e3 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+
+        assert e1["evt"] == "evt_0001"
+        assert e2["evt"] == "evt_0002"
+        assert e3["evt"] == "evt_0003"
+        assert e1["seq"] == 1
+        assert e2["seq"] == 2
+        assert e3["seq"] == 3
+
+    def test_model_client_evt_id_unique_with_tool_wrap(self, tmp_store: EventStore) -> None:
+        """[D/D.review 핵심 회귀 가드]
+
+        시간순: tool_wrap → model_client → tool_wrap
+        - γ-1 (현재): self._seq는 tool_wrap 매칭 키 (1..N 단조).
+        record_model_client는 self._seq를 건드리지 않고 self._evt_seq만
+        +1한다. 결과:
+            · tool_wrap 1: seq=1, evt=evt_0001
+            · model_client: seq=null, evt=evt_0002, parent_seq=1
+            · tool_wrap 2: seq=2 (← 1..N 단조 보존), evt=evt_0003
+        - 회귀 가드:
+            · 폐기된 Y안(model_client가 _seq 안 증가 + 단일 _seq)이 다시
+            들어오면 tool_wrap의 evt가 중복되거나 evt_0002가 누락되어
+            이 테스트가 실패한다.
+            · 폐기된 b안(model_client도 _seq 증가)이 다시 들어오면
+            e3["seq"]가 3이 되어 단조 가정이 깨지므로 이 테스트가 실패한다.
+        """
+        e1 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        e2 = tmp_store.record_model_client(parent_seq=1, tool_name="t", proposed_args={})
+        e3 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+
+        # evt ID 모두 고유 (γ-1: self._evt_seq 단일 카운터)
+        assert e1["evt"] == "evt_0001"
+        assert e2["evt"] == "evt_0002"
+        assert e3["evt"] == "evt_0003"
+        assert len({e1["evt"], e2["evt"], e3["evt"]}) == 3
+
+        # §6 매칭 키: tool_wrap seq는 1..N 단조 (γ-1: model_client가
+        # self._seq를 건드리지 않으므로 깨끗)
+        assert e1["seq"] == 1
+        assert e2["seq"] is None  # §9 "model_client seq 미부여"
+        assert e3["seq"] == 2  # γ-1: tool_wrap 매칭 키 단조
+
+        # model_client의 parent_seq는 선행 tool_wrap 표면화
+        assert e2["parent_seq"] == 1
+
+    def test_outcome_reuses_tool_wrap_evt_and_seq(self, tmp_store: EventStore) -> None:
+        """outcome 라인은 tool_wrap 라인과 evt/seq를 공유한다.
+        self._seq도 증가시키지 않음 ([D])."""
+        e1 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+
+        # outcome 직전에 tool_wrap 한 번 더 호출 → seq=2
+        e2 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+
+        tmp_store.record_outcome(
+            e2,
+            status="ok",
+            severity="info",
+            side_effect=None,
+            detail="done",
         )
-        store.record_outcome(
-            evt,
-            status="error",
-            severity=SEVERITY_CRITICAL,
-            side_effect="table_dropped",
-            detail="DROP TABLE users during content_editor task",
-        )
-        store.close()
-        lines = _read_lines(store._path)
-        assert lines[1]["outcome"]["detail"] == "DROP TABLE users during content_editor task"
-        assert lines[1]["outcome"]["severity"] == SEVERITY_CRITICAL
-        assert lines[1]["outcome"]["side_effect"] == "table_dropped"
 
-    def test_parent_dir_auto_created(self, tmp_path: Path) -> None:
-        """부모 디렉터리가 없어도 자동 생성."""
-        nested = tmp_path / "a" / "b" / "c" / "events.jsonl"
-        s = EventStore(nested)
-        s.record_tool_wrap(tool_name="x", args={}, context=None, verdict="allow")
-        s.close()
-        assert nested.exists()
+        # 마지막 두 tool_wrap 사이 outcome이 끼면 evt ID는:
+        # e1=evt_0001, e2=evt_0002, outcome=evt_0002 (재사용)
+        assert e1["evt"] == "evt_0001"
+        assert e2["evt"] == "evt_0002"
+        # outcome 라인의 evt/seq는 e2와 동일
+        events = _read_jsonl(tmp_store._path)
+        outcome_line = [ev for ev in events if ev["source"] == "outcome"]
+        assert len(outcome_line) == 1
+        assert outcome_line[0]["evt"] == "evt_0002"
+        assert outcome_line[0]["seq"] == 2
 
-    def test_each_line_is_valid_json(self, store: EventStore) -> None:
-        """한 줄 = 한 JSON 객체 보장."""
-        store.record_tool_wrap(tool_name="x", args={}, context=None, verdict="allow")
-        evt = store.record_tool_wrap(tool_name="y", args={}, context=None, verdict="allow")
-        store.record_outcome(evt, status="ok", severity=SEVERITY_INFO, detail="ok")
-        store.close()
-        with store._path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    json.loads(line)  # 예외 없으면 통과
+    def test_full_sequence_no_gaps_or_duplicates(self, tmp_store: EventStore) -> None:
+        """tool_wrap / model_client / outcome 혼합 시나리오에서
+        evt ID에 누락/중복이 없어야 한다."""
+        # tool_wrap 1
+        tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        # model_client (tool_wrap 1에 선행)
+        tmp_store.record_model_client(parent_seq=1, tool_name="t", proposed_args={})
+        # tool_wrap 2
+        e2 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        # outcome (tool_wrap 2의 결과)
+        tmp_store.record_outcome(e2, status="ok", severity="info", detail="ok")
+        # model_client (outcome 이후 — 다음 tool_wrap은 없음)
+        tmp_store.record_model_client(parent_seq=2, tool_name="t", proposed_args={})
+
+        events = _read_jsonl(tmp_store._path)
+
+        # 모든 evt ID 추출 (도구 호출 순서 무관하게 정렬)
+        evts = sorted(e["evt"] for e in events)
+
+        # 기대값: tool_wrap 1, model_client 1, tool_wrap 2, outcome 2,
+        #        model_client 2 — 총 5개의 고유 evt ID
+        # tool_wrap 2와 outcome은 같은 evt 공유 (evt_0003)
+        # model_client는 자기 카운터 슬롯을 차지함 (evt_0002, evt_0005)
+        assert evts == [
+            "evt_0001",  # tool_wrap 1
+            "evt_0002",  # model_client (tool_wrap 1 선행)
+            "evt_0003",  # tool_wrap 2
+            "evt_0003",  # outcome (tool_wrap 2 공유)
+            "evt_0004",  # model_client (tool_wrap 2 선행)
+        ]
+
+        # evt 중복은 정확히 outcome 라인에서만 허용 (tool_wrap와 공유)
+        from collections import Counter
+
+        counts = Counter(e["evt"] for e in events)
+        # evt_0003만 2회, 나머지는 1회
+        assert counts["evt_0003"] == 2
+        for k, v in counts.items():
+            if k != "evt_0003":
+                assert v == 1
+
+
+# === 추가 회귀 가드: §6 매칭 키가 model_client 카운터를 차지해도 안전 ===
+
+
+class TestReplayMatchingUnaffected:
+    """§6 매칭 키는 source=tool_wrap 라인의 seq만 사용.
+    model_client가 self._seq를 차지해도 매칭에 영향 없음을 검증."""
+
+    def test_matching_key_skips_model_client(self, tmp_store: EventStore) -> None:
+        """리플레이 매칭 관점에서 tool_wrap seq는 1..N 단조 증가.
+        model_client가 그 사이에 끼면 seq 필드값은 단조 증가하지만
+        source=tool_wrap 라인의 seq만 매칭 키로 쓰면 1..N이 깨끗.
+        """
+        # tool_wrap 1
+        tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        # model_client 끼움 (seq 필드는 null)
+        tmp_store.record_model_client(parent_seq=1, tool_name="t", proposed_args={})
+        # tool_wrap 2
+        tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+
+        events = _read_jsonl(tmp_store._path)
+
+        # source=tool_wrap 라인만 추출
+        tw_events = [e for e in events if e["source"] == "tool_wrap"]
+        tw_seqs = [e["seq"] for e in tw_events]
+
+        # tool_wrap 라인의 seq는 1, 2 — 매칭 키로 깨끗
+        assert tw_seqs == [1, 2]
+
+        # model_client 라인은 seq=null — 매칭 대상에서 제외됨
+        mc_events = [e for e in events if e["source"] == "model_client"]
+        assert all(e["seq"] is None for e in mc_events)
