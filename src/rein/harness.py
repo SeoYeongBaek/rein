@@ -13,7 +13,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from rein.adapters import is_recognized_adapter
 from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
@@ -30,10 +30,10 @@ class Context:
 
 
 # Verdict 문자열 → 예외 클래스 매핑. §4 비-silent 차단 계약을 한 자리에 둔다.
-_VERDICT_TO_EXCEPTION: dict[str, Callable[..., Exception]] = {
-    "deny": Denied,
-    "retry": RetryRequested,
-    "approve": ApprovalRequired,
+_VERDICT_TO_EXCEPTION: dict[Verdict, Callable[..., Exception]] = {
+    Verdict.DENY: Denied,
+    Verdict.APPROVE: ApprovalRequired,
+    Verdict.RETRY: RetryRequested,
 }
 
 
@@ -41,7 +41,7 @@ def _enforce(verdict: Verdict, rule_id: str, rationale: str, evt_id: str) -> Non
     """non-allow 판정을 예외로 환원. 조용한 차단 금지(§5 fail-closed)."""
     if verdict == Verdict.ALLOW:
         return
-    exc_cls = _VERDICT_TO_EXCEPTION[str(verdict)]
+    exc_cls = _VERDICT_TO_EXCEPTION[verdict]
     raise exc_cls(str(verdict), rule_id, rationale, evt_id)
 
 
@@ -51,18 +51,40 @@ class Harness:
         record: str | Path,
         rules: str | list[str] | None = None,
         config: str = "rein.yaml",
+        mode: Literal["record", "live-rerun"] = "record",
+        replay_from: str | Path | None = None,
     ) -> None:
         """
         Args:
             record: 이벤트를 append-only JSONL로 기록할 경로.
             rules: provenance 박힌 YAML 룰셋 경로. 리스트로 여러 파일 조합 가능.
             config: stage_order 등 파이프라인 설정 파일 경로. cwd 자동 탐색.
+            mode: "record"(기본) 또는 "live-rerun". replay-verify는 실도구
+                호출이 없어(§6) Harness를 거치지 않고 CLI(`rein replay`)가
+                단독 수행하므로 여기 없다.
+            replay_from: mode="live-rerun"일 때 재생할 run.jsonl 경로.
+                live-rerun은 실제 도구 함수가 사용자 프로세스 안에만
+                있어 CLI가 대신 실행할 수 없다(§4) — 그래서 사용자가
+                자기 스크립트를 다시 실행하며 여기로 트리거한다.
         """
+        # §5와 동일한 fail-closed 패턴: 잘못된 조합은 생성 시점에 즉시 에러.
+        if mode == "live-rerun" and replay_from is None:
+            raise ValueError('mode="live-rerun"이면 replay_from을 반드시 지정해야 합니다.')
+        if mode == "record" and replay_from is not None:
+            raise ValueError('replay_from은 mode="live-rerun"일 때만 사용합니다.')
+
         self.record_path = Path(record)
         self.rules = rules
         self.config = config
+        self.mode = mode
+        self.replay_from = Path(replay_from) if replay_from is not None else None
         self._observed_client: Any | None = None  # §3: 기본 비활성
         self._custom_stages: dict[str, StageFn] = {}
+        # TODO(현준): mode="live-rerun"일 때 ReplayEngine(replay_from,
+        # mode="live-rerun")을 여기서 만들어 register_tool의 wrapper가
+        # 실제 함수 호출 전에 .match(func.__name__, kwargs)로 위치 매칭
+        # 검증을 하도록 wiring한다 (CLAUDE.md §4/§6).
+        self._replay_engine: Any | None = None
 
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
         self._stage_order: list[str] = load_stage_order(config)
@@ -165,10 +187,10 @@ class Harness:
 
         # ① 검사: 첫 non-allow 승리(§5).
         for _stage_name, stage_fn in pipeline:
-            verdict, rule_id, rationale, _ = stage_fn(tool_call, ctx)
+            verdict, rule_id, rationale, evt_id = stage_fn(tool_call, ctx)
             if verdict != Verdict.ALLOW:
                 # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
-                _enforce(verdict, rule_id, rationale, evt_id="")
+                _enforce(verdict, rule_id, rationale, evt_id=evt_id)
                 return  # type: ignore[unreachable]
 
         # ② 집행: 통과한 경우에만 기록 + 실행.
