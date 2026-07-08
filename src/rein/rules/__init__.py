@@ -135,6 +135,15 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
     필터 때문에) 존재할 수 없으므로 탐색은 항상 종료한다. 단, 이 보장은
     negatives가 §11 콜드 스타트 필터(같은 tool, severity=="info")를 거쳤거나
     --golden 코퍼스가 실제로 안전한 호출만 담고 있다는 전제 위에서만 성립한다.
+
+    negatives가 아예 비어 있으면("증거 0건") depth 1→2→3 순회를 하지 않고
+    바로 가장 좁은(도달 가능한 가장 깊은) 후보를 채택한다. 순회 방식은
+    "회귀가 안 남 = 그 depth가 안전하다고 검증됨"을 전제하는데, negatives가
+    비어 있으면 어떤 depth를 골라도 회귀가 0건으로 나와 얕은(넓은) depth부터
+    통과해버린다 — 이는 "검증됨"이 아니라 "검증할 음성이 없었을 뿐"이다.
+    증거가 없는 상태에서 가장 넓게 일반화하면 §7 "틀려도 안전한 방향으로"
+    원칙과 정반대(SELECT 같은 무해한 호출까지 막는 과대차단)가 되므로,
+    이 경우만 별도로 가장 좁은 후보를 강제한다.
     """
     tool_name = born_from["tool_name"]
     role = (born_from.get("context") or {}).get("agent_role")
@@ -148,13 +157,15 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
             candidates.append(_candidate(tool_name, klass, role, depth=3))
 
     chosen = candidates[-1]
-    chosen_regressions: list[str] = [neg["evt"] for neg in negatives if rule_matches(chosen, neg)]
-    for candidate in candidates:
-        regressions = [neg["evt"] for neg in negatives if rule_matches(candidate, neg)]
-        if not regressions:
-            chosen = candidate
-            chosen_regressions = []
-            break
+    chosen_regressions: list[str] = []
+    if negatives:
+        chosen_regressions = [neg["evt"] for neg in negatives if rule_matches(chosen, neg)]
+        for candidate in candidates:
+            regressions = [neg["evt"] for neg in negatives if rule_matches(candidate, neg)]
+            if not regressions:
+                chosen = candidate
+                chosen_regressions = []
+                break
 
     return {
         "when": chosen["when"],

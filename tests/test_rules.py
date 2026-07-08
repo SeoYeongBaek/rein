@@ -86,13 +86,18 @@ def test_featurize_unparseable_query_returns_none():
 # ── synthesize_rule ───────────────────────────────────────────────────────────
 
 
-def test_synthesize_rule_no_negatives_picks_depth1():
+def test_synthesize_rule_no_negatives_picks_narrowest_depth():
+    """음성이 아예 없으면("증거 0건") 일반화하지 않고 도달 가능한 가장 좁은
+    depth(여기선 tool+class+role 모두 있으니 depth3)를 채택한다 — §7 "틀려도
+    안전한 방향으로" 원칙. 회귀 0건은 depth1부터 전부 참이므로, 얕은 depth부터
+    통과시키면 증거 없이 가장 넓게(과대차단 방향으로) 일반화하는 정반대 결과가
+    나온다."""
     born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
     rule = synthesize_rule(born_from, negatives=[])
 
-    assert rule["generality_rank"] == "1/3"
-    assert rule["when"] == {"tool": "execute_sql"}
-    assert rule["scope"] is None
+    assert rule["generality_rank"] == "3/3"
+    assert rule["when"]["features"]["class"]["in"] == ["DDL_DESTRUCTIVE"]
+    assert rule["scope"] == {"agent.role": "content_editor"}
     assert rule["regressions"] == []
     assert rule["blocks"] == ["evt_0042"]
 
