@@ -15,12 +15,20 @@
     따라서 evt 필드는 항상 고유한 이벤트 식별자다. CLI 인터페이스
     (예: rein rule-from --event evt_0042)에서 evt ID 하나로 정확히
     한 라인을 참조할 수 있다.
-    ※ self._seq와 self._evt_seq는 분리된 두 카운터다:
+    ※ 두 카운터의 책임 분리 (코드와 1:1 일치):
         · self._seq — tool_wrap 매칭 키 (§6) + §9 "단일 순번 카운터"
+                      ⇒ tool_wrap 이벤트에만 +1 증가한다.
+                        model_client / outcome 이벤트는 이 카운터를
+                        건드리지 않는다 (= 증가시키지 않는다).
         · self._evt_seq — 모든 evt ID 발급 (D)
-      record_tool_wrap은 둘 다 +1, record_model_client는 self._evt_seq만
-      +1 (self._seq는 건드리지 않음), record_outcome은 둘 다 건드리지
-      않고 직전 tool_wrap의 evt/seq를 재사용.
+                      ⇒ tool_wrap / model_client 이벤트가 +1 증가한다.
+                        outcome 이벤트는 직전 tool_wrap의 evt_id를
+                        그대로 재사용하므로 증가시키지 않는다.
+    즉, "record_*가 어떤 카운터를 증가시키는지"는 함수별로 완전히
+    고정돼 있다:
+        · record_tool_wrap  : self._seq += 1, self._evt_seq += 1
+        · record_model_client: self._evt_seq += 1 (self._seq는 증가 X)
+        · record_outcome    : 둘 다 증가 X (직전 tool_wrap의 evt/seq 재사용)
 
 [E] 스레드 안전: 파일 open + seq 증가 + write를 record_* 호출마다 단일
     self._lock 획득 안에서 원자적으로 수행한다. record_* 진입 시점에
@@ -64,15 +72,23 @@ class EventStore:
           단, record_* 진입 경로에서는 락 안에서 직접 열고, _open()은
           Harness.__enter__처럼 외부에서 락 컨텍스트를 보장하는
           진입점에서만 호출된다.
-        - 두 카운터의 책임 분리 (γ-1):
+        - 두 카운터의 책임 분리 (코드와 1:1 일치):
             · self._seq — tool_wrap 매칭 키 + §9 단일 순번 카운터.
-              tool_wrap에서만 +1, model_client/outcome은 건드리지 않음.
+              ⇒ tool_wrap 이벤트에서만 +1 증가.
+                model_client / outcome 이벤트는 이 카운터를
+                건드리지 않는다 (= 증가 X).
             · self._evt_seq — 모든 evt ID 발급 (tool_wrap + model_client).
-              outcome은 재사용만. evt ID는 모든 라인에서 고유.
+              ⇒ tool_wrap / model_client에서 +1 증가.
+                outcome은 직전 tool_wrap의 evt_id를 그대로 재사용
+                (증가 X).
         - §6 리플레이 매칭 키는 source=tool_wrap 라인의 seq만 사용.
           tool_wrap seq는 1..N 단조 (§6 매칭 깨끗).
         - outcome은 동일 이벤트에 대한 별도 라인으로 적재 (append-only 유지).
         - _open / _close는 private 진입점 (§4 "5줄 통합" 정신).
+          외부에서 닫을 필요가 생기면 공개 close()를 쓸 것 (§14 —
+          "Harness 외의 다른 곳에서도 안전하게 닫을 수 있도록").
+        - 공개 close()는 idempotent하고 self._lock 안에서 동작한다.
+          이미 닫힌 상태에서 호출해도 안전하다.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -82,7 +98,7 @@ class EventStore:
         self._evt_seq: int = 0  # [D] 모든 evt ID 발급 (단일 카운터)
         self._lock = threading.Lock()
 
-    # ---- 수명 관리 (private 진입점) ----
+    # ---- 수명 관리 ----
 
     def _open(self) -> None:
         """파일을 append 모드로 연다. 이미 열려있으면 idempotent.
@@ -101,12 +117,29 @@ class EventStore:
         """핸들을 flush + close.
 
         private 진입점 (§4 "5줄 통합" 정신). 외부 호출자는
-        Harness.__exit__로 한정된다.
+        Harness.__exit__ 또는 공개 close()로 한정된다.
         """
         if self._fh is not None:
             self._fh.flush()
             self._fh.close()
             self._fh = None
+
+    def close(self) -> None:
+        """핸들을 flush + close 한다. 공개 진입점.
+
+        이미 닫혀 있어도 안전(idempotent). 스레드 안전을 위해
+        self._lock 안에서 _close를 수행한다. Harness.__exit__가
+        외부에서 락을 이미 잡고 있을 수 있으므로 — 그러면 여기서
+        같은 락을 다시 잡으려는 시도가 발생할 수 있는데 — threading
+        .Lock은 같은 스레드에서 재진입이 불가능하므로, __exit__는
+        self._lock 없이 직접 _close를 호출하고, 그 외 외부 호출자는
+        본 메서드를 통해서만 닫게 한다(역할 분리).
+
+        Returns:
+            None
+        """
+        with self._lock:
+            self._close()
 
     # ---- tool_wrap 이벤트 ([A][B][D]) ----
 
@@ -121,11 +154,11 @@ class EventStore:
         """tool_wrap 이벤트를 한 줄 JSON으로 append하고 직렬화된 이벤트를
         돌려준다.
 
-        [A] self._seq += 1. seq 필드값 = §6 매칭 키 = §9 단일 순번 카운터.
-        [D] self._evt_seq += 1. evt ID 발급. tool_wrap / model_client /
-            outcome 모든 라인에서 고유.
-        [B] schema_version 박음.
+        카운터 동작 (코드와 1:1 일치):
+            · self._seq += 1     (tool_wrap 매칭 키, §6)
+            · self._evt_seq += 1 (evt ID 발급, [D])
 
+        [B] schema_version 박음.
         [E] 락 안에서 open + 두 카운터 증가 + write를 원자적으로 수행.
         """
         with self._lock:
@@ -135,8 +168,8 @@ class EventStore:
                 self._fh = self._path.open("a", encoding="utf-8")
             assert self._fh is not None
 
-            self._seq += 1  # [A] tool_wrap 매칭 키
-            self._evt_seq += 1  # [D] evt ID 발급
+            self._seq += 1  # [A] tool_wrap 매칭 키. 본 함수에서만 +1.
+            self._evt_seq += 1  # [D] evt ID 발급.
             seq = self._seq
             evt_id = self._make_evt_id(self._evt_seq)
 
@@ -166,10 +199,14 @@ class EventStore:
     ) -> dict[str, Any]:
         """model_client 이벤트를 적재한다. §9에 따라 seq 필드값은 null.
 
-        [D] self._evt_seq += 1 (evt ID 발급). self._seq는 건드리지
-            않음 — §6 매칭 키 보존. model_client가 self._seq를 차지
-            않으면 다음 tool_wrap은 seq=N+1을 받아 tool_wrap 라인의
-            seq가 1..N 단조로 깨끗.
+        카운터 동작 (코드와 1:1 일치):
+            · self._seq += 0     (증가시키지 않음. §6 매칭 키 보존 —
+                                  다음 tool_wrap이 seq=N+1을 받아
+                                  tool_wrap 라인의 seq가 1..N 단조로
+                                  깨끗해야 하므로 본 함수는 self._seq를
+                                  건드리지 않는다)
+            · self._evt_seq += 1 (evt ID 발급, [D])
+
         [E] 락 안에서 open + self._evt_seq 증가 + write를 원자 수행.
 
         Args:
@@ -189,9 +226,11 @@ class EventStore:
                 self._fh = self._path.open("a", encoding="utf-8")
             assert self._fh is not None
 
-            # [D] evt ID 발급을 위해 self._evt_seq만 증가. self._seq는
-            # 건드리지 않음 — §6 매칭 키(tool_wrap seq 1..N 단조) 보존.
+            # [D] evt ID 발급을 위해 self._evt_seq만 +1.
+            # self._seq는 건드리지 않는다 (= 증가 X) — §6 매칭 키
+            # (tool_wrap seq 1..N 단조) 보존이 본 함수의 핵심 불변식.
             self._evt_seq += 1
+            # self._seq는 의도적으로 그대로 둔다. 증가시키지 않는다.
             evt_id = self._make_evt_id(self._evt_seq)
 
             event = {
@@ -222,9 +261,10 @@ class EventStore:
     ) -> None:
         """이미 적재된 tool_wrap 이벤트에 대한 outcome 라인을 별도 append.
 
-        [A][D] outcome 라인은 tool_wrap 라인과 evt/seq를 공유한다. 두
-            카운터 모두 증가시키지 않음 — 직전 tool_wrap의 evt/seq를
-            그대로 재사용.
+        카운터 동작 (코드와 1:1 일치):
+            · self._seq += 0     (증가 X. 직전 tool_wrap의 seq 재사용)
+            · self._evt_seq += 0 (증가 X. 직전 tool_wrap의 evt 재사용)
+
         [E] 락 안에서 open + write를 원자 수행.
 
         Args:
@@ -241,6 +281,8 @@ class EventStore:
                 self._fh = self._path.open("a", encoding="utf-8")
             assert self._fh is not None
 
+            # outcome은 두 카운터를 모두 증가시키지 않는다.
+            # 직전 tool_wrap의 evt / seq를 그대로 재사용.
             outcome_event = {
                 "schema_version": SCHEMA_VERSION,  # [B]
                 "evt": event["evt"],
@@ -267,7 +309,10 @@ class EventStore:
         side_effect: str | None = None,
         detail: str | None = None,
     ) -> None:
-        """do_call 성공 outcome. severity="info" 고정 (M1 한정)."""
+        """do_call 성공 outcome. severity="info" 고정 (M1 한정).
+
+        카운터: 두 카운터 모두 증가 X (record_outcome 경유).
+        """
         self.record_outcome(
             event,
             status="ok",
@@ -285,7 +330,10 @@ class EventStore:
         side_effect: str | None = None,
         detail: str | None = None,
     ) -> None:
-        """do_call 예외 outcome. detail 기본값은 예외 타입+메시지."""
+        """do_call 예외 outcome. detail 기본값은 예외 타입+메시지.
+
+        카운터: 두 카운터 모두 증가 X (record_outcome 경유).
+        """
         if detail is None:
             detail = f"{type(exc).__name__}: {exc}"
         self.record_outcome(
