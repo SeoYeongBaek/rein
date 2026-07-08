@@ -10,17 +10,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from rein.adapters import ToolUse, is_recognized_adapter
+from rein.adapters import ToolUse, extract_tool_calls_for, is_recognized_adapter
 from rein.adapters.builtin import is_builtin_model_client
 from rein.adapters.protocol import has_extract_tool_calls
 from rein.adapters.providers.anthropic import AnthropicAdapter
 from rein.adapters.providers.local import LocalAdapter
 from rein.adapters.providers.openai import OpenAIAdapter
-
 
 # ---- 가짜 SDK 응답 객체 ----
 
@@ -232,9 +229,7 @@ def test_anthropic_extracts_tool_use_blocks():
     response = _FakeAnthropicResponse(
         content=[
             _FakeAnthropicBlock(type_="text", name=None, input_=None),
-            _FakeAnthropicBlock(
-                type_="tool_use", name="delete_file", input_={"path": "/tmp/x"}
-            ),
+            _FakeAnthropicBlock(type_="tool_use", name="delete_file", input_={"path": "/tmp/x"}),
         ]
     )
     out = AnthropicAdapter().extract_tool_calls(response)
@@ -282,14 +277,92 @@ def test_no_public_plugin_registration_api():
     """
     import rein.adapters as adapters_mod
 
-    public_names = {
-        n
-        for n in dir(adapters_mod)
-        if not n.startswith("_")
-    }
+    public_names = {n for n in dir(adapters_mod) if not n.startswith("_")}
     # __all__에 명시된 것만 공개.
-    assert set(adapters_mod.__all__) == {"ToolUse", "is_recognized_adapter"}
+    # __all__에 명시된 것만 공개. (라우터 함수 추가 반영)
+    assert set(adapters_mod.__all__) == {
+        "ToolUse",
+        "is_recognized_adapter",
+        "extract_tool_calls_for",
+    }
     # register_*, plugin 같은 이름이 새지 않았는지.
     assert not any(
         name.startswith("register_") or "plugin" in name.lower() for name in public_names
     )
+
+
+# ---- extract_tool_calls_for 위임 헬퍼 ----
+
+
+def test_delegate_routes_openai_builtin_to_openai_adapter():
+    """모듈 prefix만 있고 메서드 없는 순정 OpenAI 인스턴스도 라우팅으로 추출."""
+
+    class _PlainOpenAIClient:
+        # 의도적으로 extract_tool_calls 없음 — 순정 SDK 인스턴스 모델링.
+        pass
+
+    _patch_module(_PlainOpenAIClient, "openai.resources.chat")
+
+    fake_response = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "execute_sql",
+                                "arguments": '{"query": "SELECT 1"}',
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    out = extract_tool_calls_for(_PlainOpenAIClient(), fake_response)
+    assert len(out) == 1
+    assert out[0].name == "execute_sql"
+    assert out[0].args == {"query": "SELECT 1"}
+
+
+def test_delegate_routes_anthropic_builtin_to_anthropic_adapter():
+    class _PlainAnthropicClient:
+        pass
+
+    _patch_module(_PlainAnthropicClient, "anthropic.resources.messages")
+
+    fake_response = {
+        "content": [{"type": "tool_use", "name": "delete_file", "input": {"path": "/x"}}]
+    }
+
+    out = extract_tool_calls_for(_PlainAnthropicClient(), fake_response)
+    assert len(out) == 1
+    assert out[0].name == "delete_file"
+    assert out[0].args == {"path": "/x"}
+
+
+def test_delegate_falls_back_to_client_own_method():
+    """내장 자동 감지 미해당 시 client 자신의 extract_tool_calls 호출."""
+
+    class _CustomAdapter:
+        def extract_tool_calls(self, response):
+            return [ToolUse(name="custom_tool", args={"k": 1})]
+
+    _patch_module(_CustomAdapter, "my_local_runtime.client")
+
+    out = extract_tool_calls_for(_CustomAdapter(), response=None)
+    assert len(out) == 1
+    assert out[0].name == "custom_tool"
+
+
+def test_delegate_raises_on_unrecognized_client():
+    """is_recognized_adapter가 False인 client는 위임 헬퍼도 즉시 실패."""
+
+    class _Unknown:
+        pass
+
+    _patch_module(_Unknown, "requests")
+
+    with pytest.raises(TypeError, match="인식된 어댑터가 아닙니다"):
+        extract_tool_calls_for(_Unknown(), response=None)

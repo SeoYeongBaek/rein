@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
-_BUILTIN_CLIENT_MODULE_PREFIXES = ("openai", "anthropic")
+# adapters/__init__.py 에서 임포트해 갈 수 있도록 상수를 외부로 노출합니다.
+BUILTIN_OPENAI_PREFIX = "openai"
+BUILTIN_ANTHROPIC_PREFIX = "anthropic"
+
+_BUILTIN_CLIENT_MODULE_PREFIXES = (BUILTIN_OPENAI_PREFIX, BUILTIN_ANTHROPIC_PREFIX)
 
 
 def is_builtin_model_client(client: Any) -> bool:
