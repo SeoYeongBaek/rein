@@ -49,9 +49,9 @@ def _run_log_with_failure(path: Path) -> None:
     _write_jsonl(
         path,
         [
-            _tool_wrap(1, "execute_sql", "SELECT * FROM posts;", role="content_editor"),
+            _tool_wrap(0, "execute_sql", "SELECT * FROM posts;", role="content_editor"),
             _tool_wrap(
-                2,
+                1,
                 "execute_sql",
                 "DROP TABLE users;",
                 verdict="allow",
@@ -78,7 +78,7 @@ def test_dry_run_does_not_write_file(tmp_path):
     output = tmp_path / "rules.yaml"
 
     result = runner.invoke(
-        app, ["rule-from", str(log), "--event", "evt_0002", "-o", str(output), "--dry-run"]
+        app, ["rule-from", str(log), "--event", "evt_0001", "-o", str(output), "--dry-run"]
     )
 
     assert result.exit_code == 0, result.output
@@ -91,7 +91,7 @@ def test_creates_new_rules_file(tmp_path):
     _run_log_with_failure(log)
     output = tmp_path / "rules.yaml"
 
-    result = runner.invoke(app, ["rule-from", str(log), "--event", "evt_0002", "-o", str(output)])
+    result = runner.invoke(app, ["rule-from", str(log), "--event", "evt_0001", "-o", str(output)])
 
     assert result.exit_code == 0, result.output
     assert output.exists()
@@ -101,8 +101,8 @@ def test_creates_new_rules_file(tmp_path):
     assert rule["id"] == "rule_0001"
     assert rule["origin"] == "auto"
     assert rule["then"] == "deny"
-    assert rule["provenance"]["born_from"] == "evt_0002"
-    assert rule["provenance"]["blocks"] == ["evt_0002"]
+    assert rule["provenance"]["born_from"] == "evt_0001"
+    assert rule["provenance"]["blocks"] == ["evt_0001"]
     assert rule["provenance"]["regressions"] == []
 
 
@@ -115,7 +115,7 @@ def test_appends_to_existing_rules_file(tmp_path):
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["rule-from", str(log), "--event", "evt_0002", "-o", str(output)])
+    result = runner.invoke(app, ["rule-from", str(log), "--event", "evt_0001", "-o", str(output)])
 
     assert result.exit_code == 0, result.output
     text = output.read_text(encoding="utf-8")
@@ -135,7 +135,7 @@ def test_golden_negatives_produce_role_scoped_rule(tmp_path):
         log,
         [
             _tool_wrap(
-                1,
+                0,
                 "execute_sql",
                 "DROP TABLE users;",
                 verdict="allow",
@@ -148,14 +148,14 @@ def test_golden_negatives_produce_role_scoped_rule(tmp_path):
     _write_jsonl(
         golden,
         [
-            _tool_wrap(1, "execute_sql", "DROP TABLE tmp_scratch;", role="dba"),
+            _tool_wrap(0, "execute_sql", "DROP TABLE tmp_scratch;", role="dba"),
         ],
     )
     output = tmp_path / "rules.yaml"
 
     result = runner.invoke(
         app,
-        ["rule-from", str(log), "--event", "evt_0001", "--golden", str(golden), "-o", str(output)],
+        ["rule-from", str(log), "--event", "evt_0000", "--golden", str(golden), "-o", str(output)],
     )
 
     assert result.exit_code == 0, result.output
