@@ -159,6 +159,9 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
     chosen = candidates[-1]
     chosen_regressions: list[str] = []
     if negatives:
+        # depth 1~3 전부 회귀가 나면 break를 못 타서 이 chosen_regressions(비어있지
+        # 않음)가 그대로 반환된다 — 호출자(cli.py)가 이 경우를 실패로 처리해야
+        # 하는데 아직 안 함(§7 "양성 전부 차단 ∧ 음성 0회귀" 위반 상태로 통과).
         chosen_regressions = [neg["evt"] for neg in negatives if rule_matches(chosen, neg)]
         for candidate in candidates:
             regressions = [neg["evt"] for neg in negatives if rule_matches(candidate, neg)]
