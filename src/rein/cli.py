@@ -35,7 +35,7 @@ def _load_rules(rules_paths: list[str]) -> list[dict]:
     """rules.yaml 여러 개를 평탄화. 파일 하나에 `---`로 구분된 여러 규칙 문서도 지원
     (§4 rule-from의 append 동작을 받아내려면 한 파일에 규칙이 여러 개 쌓일 수 있음).
     """
-    rules = []
+    loaded = []
     for path in rules_paths:
         text = Path(path).read_text(encoding="utf-8")
         for doc in yaml.safe_load_all(text):
@@ -48,8 +48,8 @@ def _load_rules(rules_paths: list[str]) -> list[dict]:
                     stacklevel=2,
                 )
                 continue
-            rules.append(doc["rule"])
-    return rules
+            loaded.append(doc["rule"])
+    return loaded
 
 
 def _rule_matches(rule: dict, evt: dict) -> bool:
@@ -72,17 +72,17 @@ def _rule_matches(rule: dict, evt: dict) -> bool:
     return True
 
 
-def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
+def _verdict_from_rules(evt: dict, loaded_rules: list[dict]) -> str:
     """규칙 적용 후 판정. 매칭된 규칙이 여럿이면 §5 충돌 해결 우선순위
     (deny > approve > retry > allow)로 가장 제한적인 판정을 고른다.
 
-    rules는 미리 _load_rules로 로드된 규칙 리스트 — 이벤트마다 파일을 다시
-    읽지 않도록 호출자(_print_compare)가 루프 밖에서 한 번만 로드해서 넘긴다.
+    loaded_rules는 미리 _load_rules로 로드된 규칙 리스트 — 이벤트마다 파일을
+    다시 읽지 않도록 호출자(_print_compare)가 루프 밖에서 한 번만 로드해서 넘긴다.
 
     TODO: §5 가드레일 4단계(schema/permission/budget/safety) 자체는 아직 없어서
     여기선 rules.yaml 매칭만 수행 — 가드레일 엔진 연결 후 교체.
     """
-    matched = [rule.get("then", "allow") for rule in rules if _rule_matches(rule, evt)]
+    matched = [rule.get("then", "allow") for rule in loaded_rules if _rule_matches(rule, evt)]
     if not matched:
         return "allow"
     for verdict in matched:
@@ -107,7 +107,7 @@ def seed(
 @app.command()
 def replay(
     log: str,
-    rules: Annotated[
+    rules_paths: Annotated[
         list[str] | None, typer.Option("--rules", help="적용할 rules.yaml (반복 지정 가능)")
     ] = None,
     compare: Annotated[bool, typer.Option("--compare", help="가드레일 off/on A/B 비교")] = False,
@@ -137,7 +137,7 @@ def replay(
 
     if compare:
         try:
-            _print_compare(events, rules or [])
+            _print_compare(events, rules_paths or [])
         except ValueError as e:
             typer.echo(f"오류: {e}", err=True)
             raise typer.Exit(1) from None
@@ -183,11 +183,11 @@ def _print_compare(events: list[dict], rules_paths: list[str]) -> None:
     table.add_column("with_rules (on)")
     table.add_column("changed", width=8)
 
-    rules = _load_rules(rules_paths)  # 루프 밖에서 한 번만 로드 (이벤트마다 재파싱하지 않음)
+    loaded_rules = _load_rules(rules_paths)  # 루프 밖에서 한 번만 로드 (이벤트마다 재파싱하지 않음)
     changed_count = 0
     for evt in events:
         recorded = evt.get("verdict", "allow")
-        with_rules = _verdict_from_rules(evt, rules)
+        with_rules = _verdict_from_rules(evt, loaded_rules)
         changed = recorded != with_rules
         if changed:
             changed_count += 1
@@ -418,7 +418,7 @@ def rule_from(
 @app.command()
 def report(
     log: str,
-    rules: Annotated[
+    rules_path: Annotated[
         str, typer.Option("--rules", help="필수 — 후보/채택 규칙 회귀 매트릭스 렌더용")
     ],
     output: Annotated[str, typer.Option("-o", "--output")] = "report.html",
