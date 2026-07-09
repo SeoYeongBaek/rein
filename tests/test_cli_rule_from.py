@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 from typer.testing import CliRunner
 
-from rein.cli import app
+from rein.cli import _cold_start_negatives, _recomputed_severity, app
 
 runner = CliRunner()
 
@@ -173,3 +173,56 @@ def test_missing_log_file_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "없습니다" in result.output
+
+
+# ── featurizer guard (이슈 #10): 로그의 outcome.severity를 신뢰하지 않는다 ────
+
+
+def test_recomputed_severity_ignores_mistagged_log_value():
+    """로그에 severity="info"로 잘못 찍혀 있어도, 실제 쿼리가 DROP TABLE이면
+    featurize 재계산 결과(critical)를 따른다 — 로그 값을 그대로 믿지 않는다."""
+    mistagged = _tool_wrap(0, "execute_sql", "DROP TABLE users;", severity="info")
+    assert _recomputed_severity(mistagged) == "critical"
+
+
+def test_recomputed_severity_none_for_non_sql():
+    non_sql = {"tool_name": "delete_file", "args": {"path": "/tmp/x"}}
+    assert _recomputed_severity(non_sql) is None
+
+
+def test_cold_start_negatives_excludes_mistagged_destructive_event():
+    """음성 코퍼스 선정 단계에서도 재계산 severity를 쓴다 — 로그에 severity="info"로
+    잘못 태깅된 DROP TABLE 호출은 음성 후보에서 제외되어야 한다."""
+    born_from = _tool_wrap(
+        1, "execute_sql", "DROP TABLE users;", severity="critical", role="content_editor"
+    )
+    mistagged_negative = _tool_wrap(
+        0, "execute_sql", "DROP TABLE other_table;", severity="info", role="dba"
+    )
+
+    negatives = _cold_start_negatives([mistagged_negative, born_from], born_from)
+
+    assert negatives == []
+
+
+def test_cold_start_negatives_excludes_non_sql_even_if_tagged_info():
+    """featurize가 실패하는(비-SQL) 이벤트는 로그 severity가 "info"여도
+    검증 불가로 간주해 자동 제외된다."""
+    born_from = {
+        "evt": "evt_0001",
+        "tool_name": "delete_file",
+        "verdict": "allow",
+        "args": {"path": "/tmp/target"},
+        "outcome": {"severity": "critical"},
+    }
+    non_sql_negative = {
+        "evt": "evt_0000",
+        "tool_name": "delete_file",
+        "verdict": "allow",
+        "args": {"path": "/tmp/other"},
+        "outcome": {"severity": "info"},
+    }
+
+    negatives = _cold_start_negatives([non_sql_negative, born_from], born_from)
+
+    assert negatives == []

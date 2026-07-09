@@ -7,13 +7,15 @@ rule_matches는 evt["args"]를 이 모듈의 featurize()로 다시 계산해서 
 로그에 이미 박혀 있는 evt["outcome"]["severity"] 문자열을 신뢰하지
 않는다. 로그의 severity가 featurizer가 아닌 다른 경로(수기 태깅, 다른
 버전의 분류 테이블 등)로 채워졌다면 값이 어긋날 수 있기 때문이다(§8
-stale 검증 게이트와 동일한 우려). `rein rule-from`의 콜드 스타트 합성
-음성 필터(이슈 #11, cli.py의 outcome.severity == "info" 체크)는 이
-모듈과 별개로 로그의 severity 필드를 직접 읽으므로, 그 필터가 안전하려면
-로그 기록 시점에 severity가 바로 이 SEVERITY_TABLE로 계산되어 있어야
-한다. 아직 기록 경로(현준 담당, §3 인터셉터)가 이 테이블을 재사용하는지
-보장되지 않는다. 어긋남이 확인되면 이슈 #10 구현 시 severity 소스를
-검증하는 guard를 cli.py 쪽에 추가할 것.
+stale 검증 게이트와 동일한 우려).
+
+이슈 #10 guard 구현됨: `rein rule-from`의 콜드 스타트 합성 음성 필터
+(이슈 #11)도 같은 이유로 로그의 outcome.severity 필드를 직접 읽지 않는다
+— cli.py의 `_recomputed_severity()`가 evt.args를 featurize()로 다시
+계산하고 이 SEVERITY_TABLE로 severity를 도출해서 "info"인지 확인한다.
+featurize가 실패하는(비-SQL) 이벤트는 검증 불가로 간주해 음성 후보에서
+자동 제외된다 — 로그 기록 경로(§3 인터셉터, 현준 담당)가 이 테이블을
+실제로 재사용해서 태깅하는지와 무관하게 항상 안전한 방향이다.
 """
 
 from __future__ import annotations

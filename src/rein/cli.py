@@ -208,15 +208,29 @@ def _find_event(events: list[dict[str, Any]], evt_id: str) -> dict[str, Any] | N
     return next((e for e in events if e.get("evt") == evt_id), None)
 
 
+def _recomputed_severity(evt: dict[str, Any]) -> str | None:
+    """rules.__init__ 모듈 docstring의 featurizer guard: 로그의 outcome.severity를
+    신뢰하지 않고 evt.args를 featurize()로 다시 계산해서 SEVERITY_TABLE로 severity를
+    도출한다. featurize가 실패하면(비-SQL, 파싱 실패) None — "검증 불가"이지
+    "info"가 아니므로 콜드 스타트 음성 후보에서 자동 제외된다.
+    """
+    features = rules.featurize(evt.get("args") or {})
+    if features is None:
+        return None
+    return rules.SEVERITY_TABLE.get(features["class"])
+
+
 def _cold_start_negatives(
     events: list[dict[str, Any]], born_from: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """--golden 미지정 시 합성 음성(§7 안전장치 ②, 이슈 #11 확정) 도출.
 
     run_log 자신의 tool_wrap 이벤트 중 tool_name 동일 + verdict=="allow" +
-    outcome.severity=="info" + evt != born_from.evt 인 것만 음성으로 삼는다
-    (전제 조건은 rules.__init__ 모듈 docstring 참고 — 이 severity는 로그에
-    이미 기록된 값을 그대로 읽으며, featurize()로 재계산하지 않는다).
+    evt != born_from.evt + (featurize로 재계산한 severity)=="info" 인 것만
+    음성으로 삼는다. 로그에 이미 기록된 outcome.severity 필드는 신뢰하지 않는다 —
+    그 값이 §7 SEVERITY_TABLE이 아닌 다른 경로(수기 태깅 등)로 채워졌다면
+    "info == 무해" 가정이 깨질 수 있기 때문이다(이슈 #10 guard, rules.__init__
+    모듈 docstring 참고).
     """
     tool_name = born_from.get("tool_name")
     born_evt = born_from.get("evt")
@@ -225,8 +239,8 @@ def _cold_start_negatives(
         for e in events
         if e.get("tool_name") == tool_name
         and e.get("verdict") == "allow"
-        and (e.get("outcome") or {}).get("severity") == "info"
         and e.get("evt") != born_evt
+        and _recomputed_severity(e) == "info"
     ]
 
 
@@ -324,8 +338,8 @@ def rule_from(
         tool_name을 최상위 특징으로 고정하므로 회귀 검증에 신호를 주지
         못하는 가짜 음성이라 제외)
       - verdict == "allow"
-      - outcome.severity == "info" (class 기반 산출값이라 이 필터
-        하나로 §8 "validated_against는 음성 전용" 요구가 충족된다.
+      - (featurize로 재계산한) severity == "info" (class 기반 산출값이라 이
+        필터 하나로 §8 "validated_against는 음성 전용" 요구가 충족된다.
         다른 role의 DROP TABLE 같은 위험 호출이 섞여 들어올 수 없다)
       - evt != born_from.evt
       - agent.role은 필터 조건 아님 (같은 role의 무해한 호출, 다른
@@ -334,14 +348,13 @@ def rule_from(
     agent.role 모두 born_from 값 고정)인 가장 좁은 후보만 채택한다.
     실제 게이팅 구현은 이슈 #10(synthesize & verify) 쪽에서 한다.
 
-    전제 조건(§7 featurize 의존): 위 severity == "info" 필터는 로그에 이미
-    기록된 outcome.severity가 §7 분류 테이블을 통해 featurizer가 결정론적으로
-    계산한 값이라는 전제 위에서만 안전하다. 그 전제가 깨진 로그(예: severity가
-    수기로 채워졌거나 다른 버전의 분류 테이블로 계산된 경우)에서는 "info ==
-    무해"라는 가정이 깨져 위험 호출이 합성 음성에 섞여 들어올 수 있다.
-    rules 모듈은 이 리스크를 피하려 evt.args를 featurize()로 다시 계산해서
-    class를 매칭하지만, 이 cold-start 음성 "선정" 자체는 로그의 severity
-    필드를 그대로 신뢰한다.
+    featurizer guard(이슈 #10): severity == "info" 필터는 로그에 이미 기록된
+    outcome.severity 문자열을 신뢰하지 않는다. 그 값이 §7 분류 테이블이 아닌
+    다른 경로(수기 태깅 등)로 채워졌다면 "info == 무해"라는 가정이 깨져 위험
+    호출이 합성 음성에 섞여 들어올 수 있기 때문이다. 대신 `_recomputed_severity()`
+    가 evt.args를 featurize()로 다시 계산해서 §7 SEVERITY_TABLE로 severity를
+    도출하고, 그 결과가 "info"인 이벤트만 음성 후보로 삼는다. featurize가
+    실패하는(비-SQL) 이벤트는 검증 불가로 간주해 자동 제외된다.
 
     golden-vs-synthetic 비대칭: --golden을 주면 그 파일의 tool_wrap 이벤트
     전체가 음성 코퍼스가 된다. tool_name이나 severity로 미리 걸러내지
