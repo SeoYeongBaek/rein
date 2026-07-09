@@ -366,3 +366,49 @@ def test_delegate_raises_on_unrecognized_client():
 
     with pytest.raises(TypeError, match="인식된 어댑터가 아닙니다"):
         extract_tool_calls_for(_Unknown(), response=None)
+
+
+def test_callable_check_in_duck_typing():
+    """§3 두 번째 갈래는 '속성 존재'만이 아니라 '호출 가능'까지 본다."""
+
+    class _NonCallable:
+        extract_tool_calls = "not a method"  # 속성은 있지만 callable 아님
+
+    _patch_module(_NonCallable, "my_sdk.client")
+    assert is_recognized_adapter(_NonCallable()) is False
+    assert has_extract_tool_calls(_NonCallable()) is False
+
+
+def test_extract_tool_calls_for_uses_singleton_adapters():
+    """모듈 레벨 싱글톤 사용 — 호출마다 인스턴스 재생성 안 함."""
+    from rein.adapters import _ANTHROPIC_ADAPTER, _OPENAI_ADAPTER
+
+    class _PlainOpenAI:
+        pass
+
+    _patch_module(_PlainOpenAI, "openai")
+
+    # 두 번 호출해도 동일 인스턴스 응답을 사용하는지 직접 확인.
+    fake = {
+        "choices": [{"message": {"tool_calls": [{"function": {"name": "f", "arguments": "{}"}}]}}]
+    }
+    out1 = extract_tool_calls_for(_PlainOpenAI(), fake)
+    out2 = extract_tool_calls_for(_PlainOpenAI(), fake)
+    assert out1 == out2
+    # 싱글톤 인스턴스 자체가 살아있어야 함.
+    assert _OPENAI_ADAPTER is not None
+    assert _ANTHROPIC_ADAPTER is not None
+
+
+def test_internal_classes_not_in_public_all():
+    """__all__은 3개만 — providers/* 내부 클래스는 직접 노출 금지."""
+    import rein.adapters as adapters_mod
+
+    assert set(adapters_mod.__all__) == {
+        "ToolUse",
+        "is_recognized_adapter",
+        "extract_tool_calls_for",
+    }
+    # OpenAIAdapter / AnthropicAdapter는 __all__에 없음.
+    assert "OpenAIAdapter" not in adapters_mod.__all__
+    assert "AnthropicAdapter" not in adapters_mod.__all__

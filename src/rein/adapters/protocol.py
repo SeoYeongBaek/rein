@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 
 @dataclass
@@ -17,23 +17,13 @@ class ToolUse:
     args: dict[str, Any] = field(default_factory=dict)
 
 
-@runtime_checkable
-class ToolCallExtractor(Protocol):
-    """§3 최소 프로토콜. 내장 어댑터의 내부 구현 디테일.
-
-    기존 __init__.py에서 분리. 반환 타입을 list[Any]에서 list[ToolUse]
-    로 정밀화 — _observe 산출물의 §9 args 형식과 정직.
-    """
-
-    def extract_tool_calls(self, response: Any) -> list[ToolUse]: ...
-
-
 def has_extract_tool_calls(obj: Any) -> bool:
-    """§3 두 번째 갈래 검사 (duck typing).
+    """§3 두 번째 갈래 검사 (duck typing, 호출 가능성까지 검증).
 
-    런타임에서 extract_tool_calls 메서드 호출 가능 여부만 본다 —
-    Protocol 등록/상속 여부와 무관.
+    단순히 속성이 존재하는지만 보지 않고, 실제로 호출 가능한 함수인지까지
+    확인한다 — 존재만 하고 호출 불가능한 메서드면 어댑터로 부적합하다.
     """
     if obj is None:
         return False
-    return callable(getattr(obj, "extract_tool_calls", None))
+    method = getattr(obj, "extract_tool_calls", None)
+    return callable(method)
