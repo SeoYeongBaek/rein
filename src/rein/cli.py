@@ -437,7 +437,10 @@ def report(
     output: Annotated[str, typer.Option("-o", "--output")] = "report.html",
 ):
     """분기 타임라인/지표/후보 회귀 표/규칙 회귀 매트릭스를 담은 정적 HTML을 만든다."""
-    raise NotImplementedError
+    typer.echo(
+        f"report 옵션 파싱 완료: log={log}, rules={rules}, output={output} "
+        "(M1에서는 렌더링하지 않음)"
+    )
 
 
 if __name__ == "__main__":
