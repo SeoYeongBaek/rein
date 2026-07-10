@@ -156,14 +156,15 @@ class Harness:
 
         §3 fail-closed: 어댑터 인식 검증은 _observe 진입 "전"에만. 검증
         통과해야만 self._observed_client가 세팅되어 _observe()의 if문이
-        풀린다. _intercept 안에서 호출하면 표면 분리가 무너지므로 의도적으로
-        호출하지 않는다.
+        풀린다.
         """
         if not is_recognized_adapter(client):
             raise TypeError(
                 f"observe_model: {type(client)!r}는 인식된 어댑터가 아닙니다. "
-                "내장 타입(OpenAI/Anthropic/로컬)도 아니고 "
-                "extract_tool_calls(response) 메서드도 구현하지 않았습니다."
+                "내장 타입(OpenAI/Anthropic 모듈 prefix)도 아니고 "
+                "호출 가능한 extract_tool_calls(response) 메서드도 구현하지 않았습니다. "
+                "로컬 클라이언트는 §3 TODO에 따라 자동 감지 대상이 아니므로 "
+                "extract_tool_calls(response)를 직접 구현해야 합니다."
             )
         self._observed_client = client
 
