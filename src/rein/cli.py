@@ -183,12 +183,23 @@ def _to_verdict(value: str) -> Verdict:
     then: deny 같은 문자열을 받아야 하므로 name 매칭도 지원한다.
     잘못된 값은 ValueError로 환원 — §5 fail-closed (조용한 allow 취급 금지).
     """
+    # §5 fail-closed: then: null / then: 1 같은 비-str 입력은 str 검증 이전에
+    # 친절한 메시지로 거절한다. None이면 .upper() 호출에서 AttributeError가
+    # 새어나가 사용자 스택트레이스를 노출시키므로 (fail-closed 위반) 여기서 차단.
+    if not isinstance(value, str):
+        raise ValueError(
+            f"허용되지 않은 verdict 타입: {type(value).__name__}={value!r} "
+            f"(허용값: {[v.name.lower() for v in Verdict]})"
+        )
     try:
         return Verdict(value)  # value(정수) 매칭
     except ValueError:
         try:
             return Verdict[value.upper()]  # name 매칭 (대소문자 무시)
-        except KeyError as e:
+        except (KeyError, AttributeError) as e:
+            # AttributeError는 위 isinstance 가드가 정상 흐름에서 막지만,
+            # str이 아닌 객체의 .upper()가 우연히 정의돼 있는 경우 등
+            # 의외 경로를 위한 마지막 방어선.
             raise ValueError(
                 f"허용되지 않은 verdict: {value!r} (허용값: {[v.name.lower() for v in Verdict]})"
             ) from e
@@ -233,7 +244,10 @@ def seed(
     스크립트를 대신 실행해주는 일은 하지 않는다.
     """
     run_log_path = Path(run_log)
-    golden_path = run_log_path.parent / "golden_run.jsonl"
+    # §4: 골든 트레이스 = 입력 run.jsonl 그 자체 (별도 복사 없음).
+    # 메시지에서 golden_path로 참조해 변수 의미를 살리고, linter의
+    # unused 경고를 피한다 — run_log_path와 다른 의도(이 경로 = 골든).
+    golden_path = run_log_path
 
     try:
         line_count = _validate_run_log(run_log_path)
@@ -242,7 +256,9 @@ def seed(
         raise typer.Exit(1) from None
 
     typer.echo(f"검증 통과: {line_count}개 라인, tool_wrap 이벤트 critical 0건")
-    typer.echo(f"골든 트레이스: {golden_path} (run.jsonl과 동일 경로 사용)")
+    typer.echo(
+        f"골든 트레이스로 지정됨: {golden_path} (별도 복사 없음, 이 경로를 --golden에 그대로 사용)"
+    )
 
 
 @app.command()

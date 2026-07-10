@@ -55,7 +55,9 @@ def test_seed_valid_run_passes(tmp_path: Path):
 
     assert result.exit_code == 0, result.output
     assert "검증 통과" in result.output
-    assert "golden_run.jsonl" in result.output
+    # §4: 골든 트레이스 = 입력 run.jsonl 그 자체 (별도 복사 없음).
+    # 메시지가 실제 입력 경로를 안내해야 사용자가 --golden에 그대로 쓸 수 있다.
+    assert str(run) in result.output
 
 
 def test_seed_rejects_critical_outcome(tmp_path: Path):
