@@ -1,29 +1,137 @@
 """rein CLI. CLAUDE.md §4: 공개 인터페이스로 취급, M1에서 확정.
 
 명령어별 담당:
-- seed:      골든 트레이스 녹화
+- seed:      골든 트레이스 검증
 - replay:    record/replay-verify/live-rerun 3모드
 - rule-from: 실패 이벤트 → 규칙 생성
 - report:    정적 report.html 렌더
 """
 
+import json
 import warnings
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import yaml
 from rich.console import Console
 from rich.table import Table
 
+from rein.events.event_store import SCHEMA_VERSION, SEVERITY_CRITICAL, SOURCE_OUTCOME
+from rein.guardrails.verdict import Verdict
 from rein.replay.engine import ReplayEngine, ReplayMismatchError
 
 app = typer.Typer(name="rein", help="Agent = Model + Harness")
 console = Console()
 
 
-# §5: deny > approve > retry > allow
-_VERDICT_PRIORITY = {"allow": 0, "retry": 1, "approve": 2, "deny": 3}
+# ---- rein seed: 검증 헬퍼 ----
+
+
+class SeedValidationError(Exception):
+    """§4 seed 검증 실패. fail-closed — 조용한 통과 금지."""
+
+
+# §9 이벤트 스키마 검증 — rein seed가 통과시켜야 하는 최소 필드 셋.
+# §9 표에 명시된 필드만 검사. 모르는 필드는 무시(forward-compat).
+_REQUIRED_TOOL_WRAP_FIELDS = {
+    "schema_version",
+    "evt",
+    "seq",
+    "source",
+    "parent_seq",
+    "tool_name",
+    "args",
+    "context",
+    "verdict",
+}
+_REQUIRED_OUTCOME_FIELDS = {
+    "schema_version",
+    "evt",
+    "seq",
+    "source",
+    "parent_seq",
+    "tool_name",
+    "outcome",
+}
+_OUTCOME_REQUIRED_SUBFIELDS = {"status", "severity", "detail"}
+
+
+def _validate_run_log(run_log: Path) -> int:
+    """run.jsonl을 줄 단위로 검증. tool_wrap 이벤트가 1개 이상이어야 한다.
+
+    Raises:
+        SeedValidationError: 스키마 위반 또는 §4 critical outcome 검출 시.
+    """
+    if not run_log.exists():
+        raise SeedValidationError(f"{run_log} 파일이 없습니다.")
+
+    line_count = 0
+    tool_wrap_count = 0
+    with run_log.open(encoding="utf-8") as f:
+        for line_no, raw in enumerate(f, start=1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            line_count += 1
+
+            try:
+                evt = json.loads(stripped)
+            except json.JSONDecodeError as e:
+                raise SeedValidationError(f"{run_log}:{line_no} JSONL 파싱 실패: {e}") from e
+
+            source = evt.get("source")
+            if source == "tool_wrap":
+                _check_schema(evt, line_no, run_log, _REQUIRED_TOOL_WRAP_FIELDS)
+                tool_wrap_count += 1
+            elif source == SOURCE_OUTCOME:
+                _check_schema(evt, line_no, run_log, _REQUIRED_OUTCOME_FIELDS)
+                _check_outcome(evt, line_no, run_log)
+            elif source == "model_client":
+                # §9 model_client는 seq=null — 검증 스킵(스키마 표 외)
+                continue
+            else:
+                raise SeedValidationError(f"{run_log}:{line_no} 알 수 없는 source={source!r}")
+
+    if tool_wrap_count == 0:
+        raise SeedValidationError(
+            f"{run_log}: tool_wrap 이벤트가 0건입니다 — 골든 시드로 지정 불가"
+        )
+
+    return line_count
+
+
+def _check_schema(evt: dict[str, Any], line_no: int, run_log: Path, required: set[str]) -> None:
+    missing = required - set(evt.keys())
+    if missing:
+        raise SeedValidationError(f"{run_log}:{line_no} 필수 필드 누락: {sorted(missing)}")
+    if evt.get("schema_version") != SCHEMA_VERSION:
+        raise SeedValidationError(
+            f"{run_log}:{line_no} schema_version={evt.get('schema_version')!r} "
+            f"(기대값: {SCHEMA_VERSION!r})"
+        )
+
+
+def _check_outcome(evt: dict[str, Any], line_no: int, run_log: Path) -> None:
+    outcome = evt.get("outcome") or {}
+    missing = _OUTCOME_REQUIRED_SUBFIELDS - set(outcome.keys())
+    if missing:
+        raise SeedValidationError(f"{run_log}:{line_no} outcome 필수 필드 누락: {sorted(missing)}")
+    # §4 "critical outcome 0건 확인"
+    if outcome.get("severity") == SEVERITY_CRITICAL:
+        raise SeedValidationError(
+            f"{run_log}:{line_no} critical outcome 검출 — 골든 트레이스에 부적합 "
+            f"(evt={evt.get('evt')}, detail={outcome.get('detail')!r})"
+        )
+
+
+# ---- §5 충돌 해결 ----
+# §5: deny > approve > retry > allow. 우선순위는 verdict.py의 IntEnum 값 자체가
+# 정수이므로(ALLOW=1, RETRY=2, APPROVE=3, DENY=4) 별도 매핑 dict를 두지 않고
+# .value로 직접 비교한다 — verdict.py가 SSOT, cli.py는 따라갈 뿐.
+#
+# §5 단일 정수 비교:
+#   DENY=4, APPROVE=3, RETRY=2, ALLOW=1 → max(.value)로 가장 제한적인 판정 선택.
 
 
 def _load_rules(rules_paths: list[str]) -> list[dict]:
@@ -68,6 +176,35 @@ def _rule_matches(rule: dict, evt: dict) -> bool:
     return True
 
 
+def _to_verdict(value: str) -> Verdict:
+    """문자열 → Verdict 변환 헬퍼. name과 value(정수) 둘 다 허용.
+
+    IntEnum은 기본적으로 value(정수) 매칭만 허용하지만, rein은 rules.yaml의
+    then: deny 같은 문자열을 받아야 하므로 name 매칭도 지원한다.
+    잘못된 값은 ValueError로 환원 — §5 fail-closed (조용한 allow 취급 금지).
+    """
+    # §5 fail-closed: then: null / then: 1 같은 비-str 입력은 str 검증 이전에
+    # 친절한 메시지로 거절한다. None이면 .upper() 호출에서 AttributeError가
+    # 새어나가 사용자 스택트레이스를 노출시키므로 (fail-closed 위반) 여기서 차단.
+    if not isinstance(value, str):
+        raise ValueError(
+            f"허용되지 않은 verdict 타입: {type(value).__name__}={value!r} "
+            f"(허용값: {[v.name.lower() for v in Verdict]})"
+        )
+    try:
+        return Verdict(value)  # value(정수) 매칭
+    except ValueError:
+        try:
+            return Verdict[value.upper()]  # name 매칭 (대소문자 무시)
+        except (KeyError, AttributeError) as e:
+            # AttributeError는 위 isinstance 가드가 정상 흐름에서 막지만,
+            # str이 아닌 객체의 .upper()가 우연히 정의돼 있는 경우 등
+            # 의외 경로를 위한 마지막 방어선.
+            raise ValueError(
+                f"허용되지 않은 verdict: {value!r} (허용값: {[v.name.lower() for v in Verdict]})"
+            ) from e
+
+
 def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
     """규칙 적용 후 판정. 매칭된 규칙이 여럿이면 §5 충돌 해결 우선순위
     (deny > approve > retry > allow)로 가장 제한적인 판정을 고른다.
@@ -75,19 +212,24 @@ def _verdict_from_rules(evt: dict, rules: list[dict]) -> str:
     rules는 미리 _load_rules로 로드된 규칙 리스트 — 이벤트마다 파일을 다시
     읽지 않도록 호출자(_print_compare)가 루프 밖에서 한 번만 로드해서 넘긴다.
 
+    우선순위는 verdict.py의 IntEnum .value(SSOT)에서 직접 도출:
+    DENY=4 > APPROVE=3 > RETRY=2 > ALLOW=1. 별도 매핑 dict 없음.
+
     TODO: §5 가드레일 4단계(schema/permission/budget/safety) 자체는 아직 없어서
     여기선 rules.yaml 매칭만 수행 — 가드레일 엔진 연결 후 교체.
     """
     matched = [rule.get("then", "allow") for rule in rules if _rule_matches(rule, evt)]
     if not matched:
-        return "allow"
-    for verdict in matched:
-        if verdict not in _VERDICT_PRIORITY:
-            raise ValueError(
-                f"규칙의 then 값이 잘못되었습니다: {verdict!r} "
-                f"(허용값: {sorted(_VERDICT_PRIORITY)})"
-            )
-    return max(matched, key=lambda v: _VERDICT_PRIORITY[v])
+        return str(Verdict.ALLOW)  # = "allow"
+    try:
+        verdicts = [_to_verdict(v) for v in matched]
+    except ValueError as e:
+        raise ValueError(
+            f"규칙의 then 값이 잘못되었습니다: {matched!r} "
+            f"(허용값: {[v.name.lower() for v in Verdict]})"
+        ) from e
+    # §5: max(.value) — 가장 제한적인 판정. Verdict.DENY.value(=4)가 승리.
+    return str(max(verdicts, key=lambda v: v.value))
 
 
 @app.command()
@@ -95,9 +237,28 @@ def seed(
     run_log: Annotated[
         str, typer.Argument(help="검증할 run.jsonl 경로 (Harness(record=...)로 녹화됨)")
     ],
-):
-    """스키마 + critical outcome 0건을 검증한 뒤 golden_run.jsonl로 지정한다."""
-    raise NotImplementedError
+) -> None:
+    """스키마 + critical outcome 0건을 검증한 뒤 golden_run.jsonl로 지정한다 (§4).
+
+    러너가 아니다 — 이미 Harness(record=...)로 녹화된 JSONL을 검증만 한다.
+    스크립트를 대신 실행해주는 일은 하지 않는다.
+    """
+    run_log_path = Path(run_log)
+    # §4: 골든 트레이스 = 입력 run.jsonl 그 자체 (별도 복사 없음).
+    # 메시지에서 golden_path로 참조해 변수 의미를 살리고, linter의
+    # unused 경고를 피한다 — run_log_path와 다른 의도(이 경로 = 골든).
+    golden_path = run_log_path
+
+    try:
+        line_count = _validate_run_log(run_log_path)
+    except SeedValidationError as e:
+        typer.echo(f"오류: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    typer.echo(f"검증 통과: {line_count}개 라인, tool_wrap 이벤트 critical 0건")
+    typer.echo(
+        f"골든 트레이스로 지정됨: {golden_path} (별도 복사 없음, 이 경로를 --golden에 그대로 사용)"
+    )
 
 
 @app.command()
