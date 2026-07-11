@@ -145,8 +145,15 @@ def _load_rules(rules_paths: list[str]) -> list[dict]:
     """
     loaded = []
     for path in rules_paths:
-        text = Path(path).read_text(encoding="utf-8")
-        for doc in yaml.safe_load_all(text):
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as e:
+            raise ValueError(f"{path} 파일을 읽을 수 없습니다: {e}") from e
+        try:
+            docs = list(yaml.safe_load_all(text))
+        except yaml.YAMLError as e:
+            raise ValueError(f"{path} YAML 파싱 실패: {e}") from e
+        for doc in docs:
             if doc is None:
                 continue  # `---`가 만드는 빈 문서 — 정상 케이스, 조용히 스킵
             if "rule" not in doc:
@@ -526,7 +533,11 @@ def rule_from(
         if not golden_path.exists():
             typer.echo(f"오류: {golden} 파일이 없습니다.", err=True)
             raise typer.Exit(1)
-        negatives = _load_tool_wrap_events(golden_path)
+        try:
+            negatives = _load_tool_wrap_events(golden_path)
+        except ReplayMismatchError as e:
+            typer.echo(f"오류: {e}", err=True)
+            raise typer.Exit(1) from None
         validated_against = golden
     else:
         negatives = _cold_start_negatives(events, born_from)
