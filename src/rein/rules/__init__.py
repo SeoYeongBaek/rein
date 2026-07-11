@@ -161,9 +161,12 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
     chosen = candidates[-1]
     chosen_regressions: list[str] = []
     if negatives:
-        # depth 1~3 전부 회귀가 나면 break를 못 타서 이 chosen_regressions(비어있지
-        # 않음)가 그대로 반환된다 — 호출자(cli.py)가 이 경우를 실패로 처리해야
-        # 하는데 아직 안 함(§7 "양성 전부 차단 ∧ 음성 0회귀" 위반 상태로 통과).
+        # depth 1~3 전부 회귀가 나면 아래 for 루프가 break를 못 타서 이
+        # chosen_regressions(비어있지 않음)가 그대로 반환된다. 이 함수는 값을
+        # 계산해서 돌려줄 뿐 판단하지 않는다 — §7 "양성 전부 차단 ∧ 음성
+        # 0회귀" 채택 기준을 실제로 강제하는 건 호출자(cli.py rule_from())의
+        # 몫이다: non-dry-run 경로에서 이 필드가 비어있지 않으면 파일에 쓰지
+        # 않고 typer.Exit(1)로 fail-closed 한다.
         chosen_regressions = [neg["evt"] for neg in negatives if rule_matches(chosen, neg)]
         for candidate in candidates:
             regressions = [neg["evt"] for neg in negatives if rule_matches(candidate, neg)]

@@ -554,6 +554,20 @@ def rule_from(
 
     candidate = rules.synthesize_rule(born_from, negatives)
 
+    # §7 채택 기준("양성 전부 차단 ∧ 음성 0회귀") fail-closed 게이트: depth 1~3
+    # 전부 회귀가 나면 synthesize_rule은 회귀가 남은 채로 candidate를 돌려준다
+    # (판단은 호출자 몫). --dry-run이면 회귀 매트릭스로 보여주고 끝내되,
+    # 실제로 rules.yaml에 쓰는 경로에서는 조용히 넘어가지 않고 여기서 막는다.
+    if not dry_run and candidate["regressions"]:
+        typer.echo(
+            f"오류: 회귀 0건인 규칙 후보를 찾지 못했습니다 — depth 1~3 전부 음성 "
+            f"코퍼스에서 회귀 발생 ({len(candidate['regressions'])}건: "
+            f"{candidate['regressions']}). rules.yaml에 기록하지 않습니다. "
+            "--dry-run으로 회귀 매트릭스를 확인하세요.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     tool_name = born_from["tool_name"]
     role = (born_from.get("context") or {}).get("agent_role")
     features = rules.featurize(born_from.get("args") or {})

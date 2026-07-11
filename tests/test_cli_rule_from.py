@@ -166,6 +166,76 @@ def test_golden_negatives_produce_role_scoped_rule(tmp_path):
     assert rule["provenance"]["validated_against"] == str(golden)
 
 
+def test_all_depths_regress_blocks_write_and_exits_1(tmp_path):
+    """born_from에 agent_role이 없으면 depth3(scope)이 생성되지 않는다. 이때 --golden
+    음성 코퍼스에 같은 tool+class(DDL_DESTRUCTIVE) 호출이 섞여 있으면 depth1도
+    depth2도 회귀를 피할 수 없다 — §7 "음성 0회귀" 채택 기준을 만족하는 후보가
+    없으므로 rules.yaml에 쓰지 않고 exit 1이어야 한다(조용한 통과 금지)."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(
+        log,
+        [
+            _tool_wrap(0, "execute_sql", "DROP TABLE users;", verdict="allow", severity="critical"),
+        ],
+    )
+    golden = tmp_path / "golden_run.jsonl"
+    _write_jsonl(
+        golden,
+        [
+            _tool_wrap(0, "execute_sql", "DROP TABLE tmp_scratch;"),
+        ],
+    )
+    output = tmp_path / "rules.yaml"
+
+    result = runner.invoke(
+        app,
+        ["rule-from", str(log), "--event", "evt_0000", "--golden", str(golden), "-o", str(output)],
+    )
+
+    assert result.exit_code == 1
+    assert not output.exists()
+    assert "회귀" in result.output
+
+
+def test_all_depths_regress_dry_run_still_shows_matrix(tmp_path):
+    """--dry-run은 회귀가 남아도 exit 0으로 후보/매트릭스만 보여주고 끝난다
+    (파일에 쓰지 않는 건 원래도 dry-run의 동작이라 회귀 게이트와 무관)."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(
+        log,
+        [
+            _tool_wrap(0, "execute_sql", "DROP TABLE users;", verdict="allow", severity="critical"),
+        ],
+    )
+    golden = tmp_path / "golden_run.jsonl"
+    _write_jsonl(
+        golden,
+        [
+            _tool_wrap(0, "execute_sql", "DROP TABLE tmp_scratch;"),
+        ],
+    )
+    output = tmp_path / "rules.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "rule-from",
+            str(log),
+            "--event",
+            "evt_0000",
+            "--golden",
+            str(golden),
+            "-o",
+            str(output),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not output.exists()
+    assert "회귀" in result.output
+
+
 def test_missing_log_file_errors(tmp_path):
     missing = tmp_path / "does_not_exist.jsonl"
 
