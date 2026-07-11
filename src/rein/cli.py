@@ -160,26 +160,6 @@ def _load_rules(rules_paths: list[str]) -> list[dict]:
     return loaded
 
 
-def _rule_matches(rule: dict, evt: dict) -> bool:
-    """when.tool + scope.agent.role 매칭.
-
-    이슈 #10에서 구현한 rein.rules.rule_matches와 달리 when.features.class는
-    보지 않는다 — replay --compare(이슈 #9)는 rein.rules에 의존하지 않고
-    독립적으로 구현됐다. 두 매칭기가 갈라져 있는 상태는 알려진 갭이며,
-    통합은 별도 이슈로 다룬다.
-    """
-    when = rule.get("when", {})
-    if when.get("tool") and when.get("tool") != evt.get("tool_name"):
-        return False
-
-    scope = rule.get("scope") or {}
-    scoped_role = scope.get("agent.role")
-    if scoped_role and scoped_role != evt.get("context", {}).get("agent_role"):
-        return False
-
-    return True
-
-
 def _to_verdict(value: str) -> Verdict:
     """문자열 → Verdict 변환 헬퍼. name과 value(정수) 둘 다 허용.
 
@@ -222,7 +202,7 @@ def _verdict_from_rules(evt: dict, loaded_rules: list[dict]) -> str:
     TODO: §5 가드레일 4단계(schema/permission/budget/safety) 자체는 아직 없어서
     여기선 rules.yaml 매칭만 수행 — 가드레일 엔진 연결 후 교체.
     """
-    matched = [rule.get("then", "allow") for rule in loaded_rules if _rule_matches(rule, evt)]
+    matched = [rule.get("then", "allow") for rule in loaded_rules if rules.rule_matches(rule, evt)]
     if not matched:
         return str(Verdict.ALLOW)  # = "allow"
     try:

@@ -88,10 +88,9 @@ def _extract_target(parsed: exp.Expression) -> str | None:
 def rule_matches(rule: dict[str, Any], evt: dict[str, Any]) -> bool:
     """when.tool + when.features.class + scope.agent.role 매칭.
 
-    feat-9 브랜치의 _rule_matches와 같은 모양이되, features.class를
-    featurize()로 실제 계산해서 비교하는 버전이다. evt["outcome"]["severity"]가
-    아니라 evt["args"]를 다시 featurize한 결과를 쓴다 — 위 모듈 docstring의
-    featurizer 전제 조건 참고.
+    cli.py의 rule-from(synthesize/verify)과 replay --compare(_verdict_from_rules)가
+    공유하는 유일한 매처다. evt["outcome"]["severity"]가 아니라 evt["args"]를
+    다시 featurize한 결과를 쓴다 — 위 모듈 docstring의 featurizer 전제 조건 참고.
     """
     when = rule.get("when", {})
     if when.get("tool") and when.get("tool") != evt.get("tool_name"):
