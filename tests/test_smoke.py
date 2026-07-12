@@ -4,6 +4,7 @@ import pytest
 
 import rein
 from rein.guardrails import UnknownStageError
+from rein.guardrails.verdict import Verdict
 from rein.harness import Harness
 
 
@@ -45,7 +46,7 @@ def test_default_stage_order_used_without_config(tmp_path):
 
 def test_register_stage_allowed_before_activation():
     h = Harness(record="dummy.jsonl")
-    h.register_stage("custom", lambda tool_call, ctx: "allow")
+    h.register_stage("custom", lambda tool_call, ctx: (Verdict.ALLOW, "", "", ""))
     assert "custom" in h._custom_stages
 
 
@@ -54,7 +55,7 @@ def test_register_stage_blocked_after_activation():
     with h:
         pass
     with pytest.raises(RuntimeError):
-        h.register_stage("custom", lambda tool_call, ctx: "allow")
+        h.register_stage("custom", lambda tool_call, ctx: (Verdict.ALLOW, "", "", ""))
 
 
 def test_unknown_stage_in_stage_order_fails_closed_on_activation(tmp_path):

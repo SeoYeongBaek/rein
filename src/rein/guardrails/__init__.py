@@ -12,6 +12,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import yaml
 
+from rein.guardrails.verdict import Verdict
+
 # §5 표: schema -> permission -> budget -> safety, short-circuit 순서의 "기본 정책 번들" 이름.
 DEFAULT_STAGE_ORDER: tuple[str, ...] = ("schema", "permission", "budget", "safety")
 
@@ -25,9 +27,16 @@ DEFAULT_STAGE_ORDER: tuple[str, ...] = ("schema", "permission", "budget", "safet
 
 @runtime_checkable
 class StageFn(Protocol):
-    """§5: Callable[[ToolCall, Context], Verdict]."""
+    """§5: Callable[[ToolCall, Context], Verdict].
 
-    def __call__(self, tool_call: Any, context: Any) -> str: ...
+    실제 런타임 계약은 4-tuple `(verdict, rule_id, rationale, evt_id)`다.
+    `Harness._intercept`(harness.py)가 이 4개 값을 그대로 unpack하고,
+    `rule_id`/`rationale`/`evt_id`는 non-allow 판정을 예외로 환원할 때
+    (§4 `GuardrailVerdictError`) 그대로 실려 나간다 — 반환값을 `Verdict`
+    단독으로 줄이면 이 세 필드를 실어 보낼 자리가 없어진다(이슈 #33).
+    """
+
+    def __call__(self, tool_call: Any, context: Any) -> tuple[Verdict, str, str, str]: ...
 
 
 class UnknownStageError(ValueError):
