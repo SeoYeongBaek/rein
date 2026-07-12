@@ -174,6 +174,64 @@ def test_compare_scope_agent_role_matches(tmp_path):
     assert "CHANGED" in result.output
 
 
+def test_compare_features_class_scope_excludes_safe_call(tmp_path):
+    """when.features.class로 좁힌 규칙(예: rule-from이 만드는 depth>=2 규칙)은
+    같은 도구라도 클래스가 다른 안전한 호출(SELECT)까지 뭉뚱그려 막으면 안 된다
+    — _rule_matches가 features.class를 무시하고 rules.rule_matches로 통합되기
+    전에는 이 케이스가 잘못 CHANGED로 표시되던 버그의 회귀 테스트."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(log, [_tool_wrap(0, "execute_sql", {"query": "SELECT * FROM posts;"})])
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump(
+            {
+                "rule": {
+                    "id": "rule_test",
+                    "when": {
+                        "tool": "execute_sql",
+                        "features": {"class": {"in": ["DDL_DESTRUCTIVE"]}},
+                    },
+                    "then": "deny",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    assert "CHANGED" not in result.output
+
+
+def test_compare_features_class_scope_matches_destructive_call(tmp_path):
+    """같은 규칙이 실제로 DDL_DESTRUCTIVE 호출에는 적용돼야 한다(클래스 필터가
+    아예 무시되는 게 아니라 정확히 동작하는지 확인)."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(log, [_tool_wrap(0, "execute_sql", {"query": "DROP TABLE users;"})])
+
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        yaml.dump(
+            {
+                "rule": {
+                    "id": "rule_test",
+                    "when": {
+                        "tool": "execute_sql",
+                        "features": {"class": {"in": ["DDL_DESTRUCTIVE"]}},
+                    },
+                    "then": "deny",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["replay", str(log), "--compare", "--rules", str(rules)])
+    assert result.exit_code == 0
+    assert "CHANGED" in result.output
+
+
 def test_compare_rules_doc_missing_rule_key_warns_and_is_skipped(tmp_path):
     """'rule' 키가 없는 문서를 조용히 무시하면 규칙이 누락된 채 비교가 진행될 수
     있다 — 경고를 남기고, 유효한 나머지 규칙은 정상 로드되는지 확인."""
