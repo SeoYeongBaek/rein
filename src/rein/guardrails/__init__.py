@@ -15,8 +15,12 @@ import yaml
 # §5 표: schema -> permission -> budget -> safety, short-circuit 순서의 "기본 정책 번들" 이름.
 DEFAULT_STAGE_ORDER: tuple[str, ...] = ("schema", "permission", "budget", "safety")
 
-# §5 충돌 해결 우선순위: deny > approve > retry > allow (가장 제한적인 판정이 이긴다).
-VERDICT_PRIORITY: dict[str, int] = {"deny": 3, "approve": 2, "retry": 1, "allow": 0}
+# §5 충돌 해결 우선순위(deny > approve > retry > allow)는 스테이지 간이 아니라
+# rules.yaml 내 다중 매칭 규칙 간에만 적용된다(CLAUDE.md §5, 이슈 #34 결정).
+# SSOT는 guardrails/verdict.py의 Verdict IntEnum .value — 별도 매핑 dict를 두면
+# 두 정의가 어긋날 위험만 생기므로(과거 VERDICT_PRIORITY가 실제로 Verdict와
+# 다른 값을 가진 채 미사용으로 방치돼 있었다) 여기 두지 않는다. 우선순위가
+# 필요한 곳(cli.py::_verdict_from_rules)은 Verdict.value를 직접 참조한다.
 
 
 @runtime_checkable
