@@ -326,11 +326,17 @@ class EventStore:
         event: dict[str, Any],
         exc: BaseException,
         *,
-        severity: str = SEVERITY_WARNING,
+        severity: str,
         side_effect: str | None = None,
         detail: str | None = None,
     ) -> None:
         """do_call 예외 outcome. detail 기본값은 예외 타입+메시지.
+
+        severity는 필수 인자다(CLAUDE.md §9, 이슈 #31/#37 결정). §7 분류
+        테이블(SQL AST 파싱 등 자동 계산)은 M2 스코프라 아직 없지만, 그렇다고
+        모든 예외를 조용히 warning으로 뭉개면 `rein seed`의 "critical
+        outcome 0건 확인" 게이트가 구조적으로 발동 불가능해진다(fail-closed
+        위반). 호출자가 예외마다 의식적으로 severity를 고르도록 강제한다.
 
         카운터: 두 카운터 모두 증가 X (record_outcome 경유).
         """
