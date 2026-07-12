@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 from rein.adapters import is_recognized_adapter
+from rein.events import SEVERITY_WARNING, EventStore
 from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
 from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
 from rein.guardrails.verdict import Verdict
@@ -75,6 +76,8 @@ class Harness:
             raise ValueError('replay_from은 mode="live-rerun"일 때만 사용합니다.')
 
         self.record_path = Path(record)
+        # §6/§9: 모든 tool_wrap + outcome 이벤트는 이 저장소를 통해서만 append된다.
+        self._event_store = EventStore(self.record_path)
         self.rules = rules
         self.config = config
         self.mode = mode
@@ -208,16 +211,26 @@ class Harness:
             self._replay_engine.match(tool_call["name"], tool_call.get("args", {}))
 
         # ③ 집행: 통과한 경우에만 기록 + 실행.
-        #    §6 매칭 키 seq는 _record_tool_wrap_event 내부에서 부여한다.
-        self._record_tool_wrap_event(
-            {
-                "tool_name": tool_call["name"],
-                "args": tool_call.get("args", {}),
-                "verdict": "allow",
-                "ctx": ctx,
-            }
+        #    §6 매칭 키 seq는 EventStore.record_tool_wrap 내부에서 부여한다.
+        event = self._event_store.record_tool_wrap(
+            tool_name=tool_call["name"],
+            args=tool_call.get("args", {}),
+            context=ctx,
+            verdict="allow",
         )
-        return do_call()
+        try:
+            result = do_call()
+        except Exception as exc:
+            # §7 분류 테이블(SQL featurize 등)은 M2 스코프. 다운스트림
+            # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고
+            # 항상 featurize로 재계산하므로, M1은 의식적으로 선택한
+            # 고정값(warning)만 채운다(§37 — 조용한 기본값 금지는
+            # EventStore API 쪽 계약이지 호출자의 판단까지 금지하지 않음).
+            self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
+            raise
+        else:
+            self._event_store.record_ok(event)
+            return result
 
     def _observe(self, response_or_event: Any) -> None:
         """관측 표면(§3 표, 옵트인, default-off).
@@ -259,17 +272,6 @@ class Harness:
             pipeline.append((name, fn))
         return pipeline
 
-    def _record_tool_wrap_event(self, event: dict[str, Any]) -> None:
-        """tool_wrap 이벤트 기록. 본 PR에서는 최소 더미 (no-op).
-
-        §9 스키마상 source=tool_wrap, seq=단일 순번 카운터, verdict 등.
-        후속 PR(append-only JSONL 저장소 #6 / record wiring)에서 실제 구현이
-        들어온다. 본 PR은 _intercept의 "집행 표면" 책임 동결이 목적이므로
-        기록은 빈 껍데기로 둔다 — seq 카운터 도입은 record wiring PR 책임.
-        """
-        # TODO(junn1104, #6 JSONL 저장소 PR): append + seq 카운터 부여.
-        pass
-
     # --- 기본 스테이지 더미 구현체 (반환값: Verdict, rule_id, rationale, evt_id) ---
     def _default_schema_check(
         self, tool_call: dict[str, Any], ctx: Any
@@ -298,11 +300,12 @@ class Harness:
         # 켜지 않는다 — §3 "기본 비활성/옵트인"이므로 관측이 필요하면
         # with 블록 안에서 별도로 observe_model(client)을 호출해야 한다.
         self._activate()
-        # TODO(현준): 이벤트 저장소(append-only JSONL) 핸들 준비/wiring.
+        # EventStore는 lazy open(첫 record_* 호출 시점에 파일이 열림)이라
+        # 여기서 별도로 열 것은 없다.
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        # TODO(현준): 이벤트 저장소 flush/close. observe_model()로 등록된
-        # 클라이언트가 있다면 여기서 원상 복구/정리한다. __exit__은
-        # 정리 전용이지 집행 지점이 아니다.
+        # TODO(현준): observe_model()로 등록된 클라이언트가 있다면 여기서
+        # 원상 복구/정리한다. __exit__은 정리 전용이지 집행 지점이 아니다.
+        self._event_store.close()
         return None
