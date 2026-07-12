@@ -296,3 +296,32 @@ class TestReplayMatchingUnaffected:
         # model_client 라인은 seq=null — 매칭 대상에서 제외됨
         mc_events = [e for e in events if e["source"] == "model_client"]
         assert all(e["seq"] is None for e in mc_events)
+
+
+# === 이슈 #31/#37: record_error의 severity는 조용한 기본값 없이 필수 ===
+
+
+class TestRecordErrorSeverityRequired:
+    """record_error가 예외 종류와 무관하게 항상 severity="warning"을 조용히
+    깔고 가면 `rein seed`의 "critical outcome 0건 확인" 게이트가 구조적으로
+    발동 불가능해진다(CLAUDE.md §9, 이슈 #31 결정). severity를 필수 키워드
+    인자로 만들어 호출자가 매 예외마다 의식적으로 고르게 강제한다.
+    """
+
+    def test_record_error_without_severity_raises_type_error(self, tmp_store: EventStore) -> None:
+        event = tmp_store.record_tool_wrap(
+            tool_name="execute_sql", args={}, context=None, verdict="allow"
+        )
+        with pytest.raises(TypeError):
+            tmp_store.record_error(event, RuntimeError("boom"))  # type: ignore[call-arg]
+
+    def test_record_error_with_explicit_severity_is_recorded(self, tmp_store: EventStore) -> None:
+        event = tmp_store.record_tool_wrap(
+            tool_name="execute_sql", args={}, context=None, verdict="allow"
+        )
+        tmp_store.record_error(event, RuntimeError("boom"), severity="critical")
+
+        events = _read_jsonl(tmp_store._path)
+        outcome = next(e for e in events if e["source"] == "outcome")
+        assert outcome["outcome"]["severity"] == "critical"
+        assert outcome["outcome"]["status"] == "error"
