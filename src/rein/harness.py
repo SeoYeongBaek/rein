@@ -10,6 +10,7 @@ CLAUDE.md §4 확정 시그니처. 이 파일의 인터페이스(메서드 이�
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import Callable
 from pathlib import Path
@@ -145,6 +146,7 @@ class Harness:
                 # _intercept는 정상 호출을 모델링하므로 여기선 합치기만 시도
                 return dict(kwargs)
 
+        @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             ctx = None  # 추후 Context() 객체 연동 시 수정
             bound = _bound_args(args, kwargs)

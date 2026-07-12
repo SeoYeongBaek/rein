@@ -29,6 +29,9 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "pre-commit>=3.0",
+    # 이슈 #15: register_tool을 외부 프레임워크(LangChain)에 붙여도
+    # 충돌 없이 동작하는지 검증하기 위한 최소 통합 의존성.
+    "langchain-core>=0.3",
 ]
 
 [project.scripts]
