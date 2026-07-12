@@ -21,7 +21,13 @@ from rich.console import Console
 from rich.table import Table
 
 from rein import rules
-from rein.events.event_store import SCHEMA_VERSION, SEVERITY_CRITICAL, SOURCE_OUTCOME
+from rein.events.event_store import (
+    SCHEMA_VERSION,
+    SEVERITY_CRITICAL,
+    SOURCE_MODEL_CLIENT,
+    SOURCE_OUTCOME,
+    SOURCE_TOOL_WRAP,
+)
 from rein.guardrails.verdict import Verdict
 from rein.replay.engine import ReplayEngine, ReplayMismatchError, _load_tool_wrap_events
 
@@ -86,13 +92,13 @@ def _validate_run_log(run_log: Path) -> int:
                 raise SeedValidationError(f"{run_log}:{line_no} JSONL 파싱 실패: {e}") from e
 
             source = evt.get("source")
-            if source == "tool_wrap":
+            if source == SOURCE_TOOL_WRAP:
                 _check_schema(evt, line_no, run_log, _REQUIRED_TOOL_WRAP_FIELDS)
                 tool_wrap_count += 1
             elif source == SOURCE_OUTCOME:
                 _check_schema(evt, line_no, run_log, _REQUIRED_OUTCOME_FIELDS)
                 _check_outcome(evt, line_no, run_log)
-            elif source == "model_client":
+            elif source == SOURCE_MODEL_CLIENT:
                 # §9 model_client는 seq=null — 검증 스킵(스키마 표 외)
                 continue
             else:
