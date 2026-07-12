@@ -19,6 +19,7 @@ from rein.adapters import is_recognized_adapter
 from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
 from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
 from rein.guardrails.verdict import Verdict
+from rein.replay import ReplayEngine
 
 F = TypeVar("F", bound=Callable)
 
@@ -80,11 +81,11 @@ class Harness:
         self.replay_from = Path(replay_from) if replay_from is not None else None
         self._observed_client: Any | None = None  # §3: 기본 비활성
         self._custom_stages: dict[str, StageFn] = {}
-        # TODO(현준): mode="live-rerun"일 때 ReplayEngine(replay_from,
-        # mode="live-rerun")을 여기서 만들어 register_tool의 wrapper가
-        # 실제 함수 호출 전에 .match(func.__name__, kwargs)로 위치 매칭
-        # 검증을 하도록 wiring한다 (CLAUDE.md §4/§6).
-        self._replay_engine: Any | None = None
+        # live-rerun: 실제 함수 호출 직전 위치 매칭(§6)에 쓸 엔진.
+        # record 모드에서는 None으로 두어 _intercept가 match()를 건너뛴다.
+        self._replay_engine: ReplayEngine | None = None
+        if mode == "live-rerun":
+            self._replay_engine = ReplayEngine(self.replay_from, mode="live-rerun")
 
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
         self._stage_order: list[str] = load_stage_order(config)
@@ -181,8 +182,15 @@ class Harness:
         경우에만 do_call을 실행한다 — 이 한 자리가 "집행 여부" 결정의
         유일한 지점이며, _observe와 책임이 겹치지 않는다(§3 표면 분리).
 
+        mode="live-rerun"이면 실제 함수 호출 직전에 ReplayEngine.match()로
+        녹화 시퀀스와의 위치 매칭을 검증한다(§6). 매칭 실패는
+        ReplayMismatchError로 그대로 전파된다 — 가드레일이 이전 실행과
+        다른 지점에서 개입하면 그 이후 위치 매칭이 깨지는 것 자체가
+        §6 "정직한 한계"의 관측 결과이므로 여기서 흡수하지 않는다.
+
         Raises:
             Denied | RetryRequested | ApprovalRequired: 첫 non-allow 판정.
+            ReplayMismatchError: live-rerun 위치 매칭 실패.
         """
         pipeline = self._sealed_pipeline()  # _activate() 완료 후에만 유효.
 
@@ -194,7 +202,12 @@ class Harness:
                 _enforce(verdict, rule_id, rationale, evt_id=evt_id)
                 return  # type: ignore[unreachable]
 
-        # ② 집행: 통과한 경우에만 기록 + 실행.
+        # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
+        #    녹화된 시퀀스의 같은 자리인지 확인한다(§6 인자 매칭 규칙).
+        if self._replay_engine is not None:
+            self._replay_engine.match(tool_call["name"], tool_call.get("args", {}))
+
+        # ③ 집행: 통과한 경우에만 기록 + 실행.
         #    §6 매칭 키 seq는 _record_tool_wrap_event 내부에서 부여한다.
         self._record_tool_wrap_event(
             {
