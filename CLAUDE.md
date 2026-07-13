@@ -594,6 +594,27 @@ rule:
   `validated_against`/`blocks`/`regressions`) + `run.jsonl`(양성 이벤트
   원본) + `validated_against` 경로 파일(음성 이벤트 재생 목록).
 
+### 분기 타임라인 UI 스펙 (요소 ①, #48 확정)
+
+- **정렬**: `seq` 오름차순이 기본 축. `source == "model_client"` 이벤트는
+  `seq`가 없으므로(§9) 자신의 `parent_seq`가 가리키는 `tool_wrap` 행
+  바로 앞에 삽입한다. 같은 `parent_seq`를 가진 `model_client` 이벤트가
+  여럿이면 로그에 기록된 순서를 그대로 유지한다.
+- **행 구성**: 같은 `evt`의 `tool_wrap` 줄과 `outcome` 줄(§9, 두 줄
+  분리 스키마)을 한 행으로 병합해 표시한다 — `seq`/`tool_name`/
+  `verdict`/`outcome.severity`/`outcome.detail`.
+- **분기(off/on) 표시**: 기록된 verdict(off, `tool_wrap.verdict`)와
+  `rules.yaml` 적용 후 verdict(on, `_verdict_from_rules` 재사용)를 두
+  칼럼으로 나란히 두고, 값이 최초로 갈리는 행을 분기점으로 강조 표시한다.
+  §6의 "정직한 한계"(A/B는 첫 개입 지점까지만 유효)에 따라, 분기점 이후
+  행은 "분기 이후 미검증"으로 흐리게 표시해 그 이후 시퀀스가 A/B
+  비교로서는 의미가 없음을 시각적으로 드러낸다.
+- **데이터 소스**: `run.jsonl` 전체(`seq`/`source`/`parent_seq`/
+  `tool_wrap`/`outcome`) + `rules.yaml`(on 계산, `rules.rule_matches`
+  재사용).
+- **스코프 밖**: 필터·검색·무한스크롤 등 범용 타임라인 대시보드 기능은
+  추가하지 않는다(§11 바벨 전략, "범용 타임라인 UI"는 함정으로 명시).
+
 - **UI 투자는 바벨(barbell) 전략**: 위 한 화면에만 투자, 나머지
   (설정 화면·인증·범용 타임라인 대시보드)는 투자 금지. 특히 "범용
   타임라인 UI"는 함정으로 명시되어 있다 — LangSmith/Phoenix가 이미
