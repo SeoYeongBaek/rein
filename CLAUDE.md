@@ -453,6 +453,41 @@ n번째 인터셉트 호출은 무조건 로그의 n번째 `tool_wrap` 이벤트
 **권한 테이블에서 정확히 어떻게 음성을 도출할지 구체 알고리즘은 아직
 미정 — TODO: 가희 확정** (회귀 엔진 소유자 판단 영역).
 
+### 킬러 데모 A/B 시나리오 (#46 확정)
+
+§8/§9 예시에 이미 쓰인 `content_editor` / `execute_sql` / "공지사항
+업데이트" 조합을 정식 데모 스크립트로 확정한다. guardrail off/on
+분기가 드러나는 최소 시나리오 하나면 충분하다 — 여러 시나리오를
+새로 설계하지 않는다.
+
+1. `rein seed golden_run.jsonl` — `content_editor`가 "공지사항
+   업데이트" task 수행 중 호출하는 안전한 SQL(`SELECT`, `WHERE` 절
+   있는 `UPDATE`) **2~3건**을 녹화한다(§4 온보딩 2단계).
+2. `@h.register_tool`로 계측된 `execute_sql`을 가진 에이전트 루프(§12
+   M1에서 검증된 순수 Python 루프 경로 재사용)를 실행한다. 같은 task를
+   수행하다 나노급 모델이 `DROP TABLE users;`를 제안하고, 아직 규칙이
+   없어 guardrail 없이(off) 그대로 실행되어 `run.jsonl`에 critical
+   outcome으로 기록된다.
+3. `rein rule-from run.jsonl --event evt_XXXX --golden golden_run.jsonl`
+   → `rule_0007`(§8 예시) 생성, 회귀 0건 확인.
+4. `rein replay run.jsonl --rules rules.yaml --compare` → 같은
+   `DROP TABLE` 호출이 off에서는 `allow`, on에서는 `deny`로 갈리는
+   행이 표에 드러난다 — 이 행이 발표 시연의 핵심 장면이다.
+5. `rein report run.jsonl --rules rules.yaml -o report.html` → 위
+   결과가 §11 4요소 리포트로 시각화된다.
+
+**필요한 golden 트레이스**:
+- (필수) `content_editor` 정상 트레이스 2~3개 — 위 1단계.
+- (스트레치) 다른 role(예: `admin`)의 동일 `execute_sql` 호출 최소
+  1개 — §7 콜드 스타트 안전장치 ②(role 기반 depth=3 scope)가 실제로
+  걸러지는 모습을 시연에서 명시적으로 보여주고 싶을 때만 추가한다.
+  없어도 `run.jsonl` 자체의 콜드 스타트 합성 음성으로 온보딩은
+  성립한다.
+
+**스코프 밖**: golden 트레이스 실제 데이터 생성(#55)과 나노 모델의
+DROP TABLE 유도 재현율 스모크테스트(§11 "검증 필요" 항목)는 이
+이슈가 아니라 각각 별도 이슈에서 다룬다.
+
 ## 8. 규칙 저장 형식 — provenance 박힌 YAML
 
 ```yaml
