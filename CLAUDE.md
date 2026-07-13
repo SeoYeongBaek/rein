@@ -570,6 +570,30 @@ rule:
   (기존 게 안 깨지는가). 반드시 실제 JSONL을 먹여 그려야 한다(연출
   의심 차단). 분기 타임라인은 §9의 `parent_seq`를 이용해 model_client
   제안 → tool_wrap 실행 순서를 표시한다.
+### 회귀 매트릭스 렌더링 스펙 (요소 ④, #47 확정)
+
+렌더링 단위는 **"규칙 1개 × 그 규칙의 검증 코퍼스"** 하나다. `rules.yaml`에
+규칙이 여럿이면 규칙마다 매트릭스 섹션을 반복 렌더링한다 — 전체 규칙 ×
+전체 트레이스로 합친 교차표는 만들지 않는다(스코프 밖).
+
+- **행**: 검증 코퍼스에 속한 이벤트 전부. 양성 1건(`provenance.born_from`)
+  + 음성 N건(`provenance.validated_against` 파일의 `tool_wrap` 이벤트
+  전체).
+- **열**: `evt` / `tool_name` / `agent_role` / 코퍼스 구분(양성·음성) /
+  규칙 적용 판정 / 표기 라벨.
+- **판정 재계산**: 저장된 `blocks`/`regressions` 목록으로 표를 그대로
+  채우되, 개별 행의 "규칙 적용 판정" 칼럼은 `rules.rule_matches`를
+  그대로 재사용해 계산한다 — 새 매칭 로직을 만들지 않는다.
+- **라벨 규칙**:
+  - 양성 행이 deny → **Blocked**(의도한 차단, 정상)
+  - 음성 행이 allow → **Pass**(정상)
+  - 음성 행이 deny → **Blocked**로 표기하되 회귀로 강조(`regressions`와
+    1:1 대응) — `cli.py::_print_dry_run`의 기존 표기("deny (회귀)")와
+    스타일을 통일한다.
+- **데이터 소스**: `rules.yaml` provenance(`id`/`born_from`/
+  `validated_against`/`blocks`/`regressions`) + `run.jsonl`(양성 이벤트
+  원본) + `validated_against` 경로 파일(음성 이벤트 재생 목록).
+
 - **UI 투자는 바벨(barbell) 전략**: 위 한 화면에만 투자, 나머지
   (설정 화면·인증·범용 타임라인 대시보드)는 투자 금지. 특히 "범용
   타임라인 UI"는 함정으로 명시되어 있다 — LangSmith/Phoenix가 이미
