@@ -348,7 +348,11 @@ def test_rule_from_without_permissions_section_falls_back_to_log_only(tmp_path):
 
     assert result.exit_code == 0, result.output
     doc = next(yaml.safe_load_all(output.read_text(encoding="utf-8")))
-    assert doc["rule"]["provenance"]["validated_against"] == str(log)
+    validated_against = doc["rule"]["provenance"]["validated_against"]
+    assert str(log) in validated_against
+    assert "permissions" not in validated_against
+    assert "cold-start subset" in validated_against
+    assert "born_from=evt_0001" in validated_against
 
 
 def test_cold_start_negatives_excludes_non_sql_even_if_tagged_info():

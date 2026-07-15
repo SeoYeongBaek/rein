@@ -567,7 +567,15 @@ def rule_from(
         permission_table = rules.load_permission_table(config)
         permission_negatives = rules.permission_table_negatives(born_from, permission_table)
         negatives = negatives + permission_negatives
-        validated_against = f"{log} (+ {config} permissions)" if permission_negatives else log
+        # §8 "validated_against는 음성 전용, born_from과 섞지 않는다" 원칙은 실제
+        # negatives 리스트(코드)에서는 지켜지지만(_cold_start_negatives가 evt !=
+        # born_from을 필터링), --golden 없이 log 자체를 그대로 validated_against에
+        # 적으면 born_from을 담은 그 파일을 "음성 코퍼스"라고 부르는 것처럼 보여
+        # provenance만 읽는 감사자에게 분리 원칙이 깨진 것처럼 비친다. cold-start
+        # 서브셋이고 born_from은 제외됐다는 점을 문자열 자체에 명시한다.
+        validated_against = f"{log} (cold-start subset, excludes born_from={event})"
+        if permission_negatives:
+            validated_against += f" + {config} permissions"
 
     candidate = rules.synthesize_rule(born_from, negatives)
 
