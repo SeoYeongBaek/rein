@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from rein.rules import (
     featurize,
     load_permission_table,
@@ -234,3 +236,60 @@ def test_load_permission_table_reads_permissions_section(tmp_path):
 
     assert table["content_editor"]["execute_sql"] == ["SQL_SAFE"]
     assert table["admin"]["execute_sql"] == ["SQL_SAFE", "DDL_DESTRUCTIVE", "DML_DESTRUCTIVE"]
+
+
+def test_load_permission_table_rejects_typo_class_name(tmp_path):
+    """오타난 class명(SQL_SAFEE)을 조용히 무시하지 않고 즉시 에러 — §5 stage_order의
+    조용한 무시 금지 원칙과 동일. 조용히 넘어가면 admin에게 주려던 예외가 사라진 채로
+    synthesize_rule이 "회귀 0건"으로 오판해 admin까지 막는 규칙을 승인해버린다."""
+    config = tmp_path / "rein.yaml"
+    config.write_text(
+        "permissions:\n  admin:\n    execute_sql: [SQL_SAFEE]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="SQL_SAFEE"):
+        load_permission_table(config)
+
+
+def test_load_permission_table_rejects_non_dict_role_entry(tmp_path):
+    """role 값이 tool -> class 매핑(dict)이 아니면 조용히 넘기지 않고 즉시 에러."""
+    config = tmp_path / "rein.yaml"
+    config.write_text(
+        "permissions:\n  admin: execute_sql\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="admin"):
+        load_permission_table(config)
+
+
+def test_permission_table_negatives_rejects_unknown_class_even_without_load():
+    """load_permission_table을 거치지 않고 permission_table_negatives에 직접 잘못된
+    class명을 넘겨도 조용히 스킵되지 않고 에러여야 한다 — 검증은 호출 경로에
+    의존하면 안 된다."""
+    born_from = {
+        "evt": "evt_0042",
+        "tool_name": "execute_sql",
+        "args": {"query": "DROP TABLE users;"},
+        "context": {"agent_role": "content_editor"},
+        "verdict": "allow",
+    }
+    table = {"admin": {"execute_sql": ["DDL_DESTRUCTIV"]}}  # 오타: 마지막 E 누락
+
+    with pytest.raises(ValueError, match="DDL_DESTRUCTIV"):
+        permission_table_negatives(born_from, table)
+
+
+def test_permission_table_negatives_rejects_non_dict_tools_even_without_load():
+    born_from = {
+        "evt": "evt_0042",
+        "tool_name": "execute_sql",
+        "args": {"query": "DROP TABLE users;"},
+        "context": {"agent_role": "content_editor"},
+        "verdict": "allow",
+    }
+    table = {"admin": ["execute_sql"]}  # dict가 아니라 list
+
+    with pytest.raises(ValueError, match="admin"):
+        permission_table_negatives(born_from, table)

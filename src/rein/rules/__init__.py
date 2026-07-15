@@ -151,7 +151,40 @@ def load_permission_table(config_path: str | Path = "rein.yaml") -> dict[str, di
     table = data.get("permissions") or {}
     if not isinstance(table, dict):
         raise ValueError(f"{config_path}: permissions는 role -> tool -> class 목록 매핑이어야 함")
+    for role, tools in table.items():
+        _validate_permission_entry(config_path, role, tools)
     return table
+
+
+def _validate_permission_entry(config_path: str | Path, role: str, tools: Any) -> None:
+    """§5.2 fail-closed: role별 항목의 구조/class명을 즉시 검증한다 (이슈 #11).
+
+    검증 없이 조용히 넘어가면(오타 class명이 CANONICAL_SQL_BY_CLASS.get()에서
+    걸러지듯 그냥 사라지면) 결과는 "안전 실패"가 아니라 "안전 미실행"이다 —
+    관리자가 admin에게 DDL_DESTRUCTIVE를 허용한다고 써놨는데 오타로 그 항목이
+    조용히 사라지면, permission_table_negatives가 admin의 정당한 호출에 대한
+    negative를 못 만들어내고 synthesize_rule은 그 신호가 아예 없었던 것처럼
+    동작해 admin까지 막는 규칙을 "회귀 0건"으로 승인해버린다 — 관리자가 명시적으로
+    지켜주려던 권한이 오타 하나로 조용히 뚫리는 셈이라, §5 stage_order의 조용한
+    무시 금지 원칙(UnknownStageError)과 동일하게 여기서도 즉시 에러가 맞다.
+    """
+    if not isinstance(tools, dict):
+        raise ValueError(
+            f"{config_path}: permissions.{role}은 tool -> class 목록 매핑이어야 함 "
+            f"(실제: {tools!r})"
+        )
+    for tool, classes in tools.items():
+        if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
+            raise ValueError(
+                f"{config_path}: permissions.{role}.{tool}은 문자열 class 목록이어야 함 "
+                f"(실제: {classes!r})"
+            )
+        unknown = [c for c in classes if c not in CANONICAL_SQL_BY_CLASS]
+        if unknown:
+            raise ValueError(
+                f"{config_path}: permissions.{role}.{tool}에 알 수 없는 class {unknown} "
+                f"(허용값: {sorted(CANONICAL_SQL_BY_CLASS)})"
+            )
 
 
 def permission_table_negatives(
@@ -174,6 +207,10 @@ def permission_table_negatives(
     born_from과 정확히 같은 (role, tool, class) 조합은 제외한다 — 그 조합은 지금
     막으려는 실패 그 자체이므로, 권한 테이블에 실수로 같이 올라 있어도 negative로
     셀 수 없다(§8 "validated_against는 음성 전용, born_from과 섞지 않는다"와 같은 원칙).
+
+    permission_table의 구조/class명은 load_permission_table을 거치지 않고 직접
+    전달됐을 수도 있으므로 여기서도 다시 검증한다(_validate_permission_entry) —
+    호출 경로와 무관하게 오타/잘못된 구조가 조용히 무시되지 않게 하기 위해서다.
     """
     tool_name = born_from.get("tool_name")
     role_at_fault = (born_from.get("context") or {}).get("agent_role")
@@ -182,15 +219,14 @@ def permission_table_negatives(
 
     negatives: list[dict[str, Any]] = []
     for role, tools in permission_table.items():
-        allowed_classes = tools.get(tool_name) if isinstance(tools, dict) else None
+        _validate_permission_entry("<permission_table>", role, tools)
+        allowed_classes = tools.get(tool_name)
         if not allowed_classes:
             continue
         for klass in allowed_classes:
             if role == role_at_fault and klass == born_class:
                 continue
-            sql = CANONICAL_SQL_BY_CLASS.get(klass)
-            if sql is None:
-                continue
+            sql = CANONICAL_SQL_BY_CLASS[klass]  # _validate_permission_entry가 클래스명을 이미 보장
             negatives.append(
                 {
                     "evt": f"synthetic_perm_{role}_{tool_name}_{klass}",
