@@ -437,7 +437,24 @@ def _rationale(tool_name: str, klass: str | None, role: str | None, scoped: bool
     return f"{prefix}{tool_name}의 {klass} 호출은 차단 대상"
 
 
-def _print_dry_run(rule_doc: dict[str, Any], negatives: list[dict[str, Any]]) -> None:
+def _print_dry_run(
+    rule_doc: dict[str, Any],
+    negatives: list[dict[str, Any]],
+    candidate_trail: list[dict[str, Any]],
+) -> None:
+    """후보 규칙 요약 + 후보별 회귀(depth 1→2→3) + 회귀 매트릭스를 출력한다.
+
+    candidate_trail은 일부러 rule_doc(=rules.yaml에 그대로 쓰일 provenance)에
+    넣지 않고 별도 인자로 받는다 — depth1처럼 좁혀지지 않은 후보는 골든
+    코퍼스 전체를 매칭시켜버려 evt 목록이 코퍼스 크기만큼 불어나는데, 이걸
+    rules.yaml에 영구 기록하면 규칙 하나당 크기가 코퍼스 크기에 비례해
+    §8의 나머지 필드(전부 "그 규칙에 대한 요약값"이라 크기가 예측 가능함)와
+    성격이 달라진다. 이 표는 --dry-run 시점의 일회성 디버그 정보로만
+    남기고, rein report가 나중에 이 데이터가 필요하면 born_from +
+    validated_against로 synthesize_rule을 다시 돌려 재계산한다(로그가
+    바뀌면 재계산이 더 정확하기도 하다 — 영구 저장분은 그 시점 스냅샷일
+    뿐이라 오히려 오해를 줄 수 있다).
+    """
     rule_body = rule_doc["rule"]
 
     summary = Table(title="후보 규칙", show_lines=False)
@@ -446,19 +463,20 @@ def _print_dry_run(rule_doc: dict[str, Any], negatives: list[dict[str, Any]]) ->
     for key in ("id", "origin", "when", "scope", "then", "rationale"):
         summary.add_row(key, str(rule_body.get(key)))
     for key, value in rule_body["provenance"].items():
-        if key == "candidate_trail":
-            continue  # 아래 별도 표(§11 요소③ 후보 회귀 표)로 렌더링
         summary.add_row(f"provenance.{key}", str(value))
     console.print(summary)
 
-    trail = Table(title="후보별 회귀 (depth 1→2→3, §11 요소③)", show_lines=False)
+    trail = Table(
+        title="후보별 회귀 (depth 1→2→3, §11 요소③ — dry-run 전용, rules.yaml에 저장되지 않음)",
+        show_lines=False,
+    )
     trail.add_column("depth")
     trail.add_column("when")
     trail.add_column("scope")
     trail.add_column("회귀 건수")
     trail.add_column("회귀 evt")
     chosen_depth = rule_body["provenance"]["generality_rank"]
-    for entry in rule_body["provenance"]["candidate_trail"]:
+    for entry in candidate_trail:
         depth_label = f"{entry['depth']}/3"
         is_chosen = depth_label == chosen_depth
         depth_text = f"[green]{depth_label} (채택)[/green]" if is_chosen else depth_label
@@ -638,7 +656,6 @@ def rule_from(
         "blocks": candidate["blocks"],
         "regressions": candidate["regressions"],
         "generality_rank": candidate["generality_rank"],
-        "candidate_trail": candidate["candidate_trail"],
         "extractor": f"sqlglot=={importlib.metadata.version('sqlglot')}",
         "tool_sig": _tool_sig(tool_name, born_from.get("args") or {}),
         "feature_schema": rules.FEATURE_SCHEMA_VERSION,
@@ -646,7 +663,7 @@ def rule_from(
     rule_doc = {"rule": rule_body}
 
     if dry_run:
-        _print_dry_run(rule_doc, negatives)
+        _print_dry_run(rule_doc, negatives, candidate["candidate_trail"])
         return
 
     _append_rule_doc(Path(output), rule_doc)

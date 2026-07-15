@@ -104,9 +104,26 @@ def test_creates_new_rules_file(tmp_path):
     assert rule["provenance"]["born_from"] == "evt_0001"
     assert rule["provenance"]["blocks"] == ["evt_0001"]
     assert rule["provenance"]["regressions"] == []
-    trail = rule["provenance"]["candidate_trail"]
-    assert [entry["depth"] for entry in trail] == [1, 2, 3]
-    assert all("regressions" in entry for entry in trail)
+    # candidate_trail은 코퍼스 크기에 비례해 커질 수 있어(§8 나머지 필드와
+    # 성격이 다름) rules.yaml에는 쓰지 않는다 — dry-run 콘솔 출력 전용.
+    assert "candidate_trail" not in rule["provenance"]
+
+
+def test_dry_run_shows_candidate_trail_but_does_not_persist_it(tmp_path):
+    """--dry-run 콘솔에는 depth별 후보 회귀 표가 보이지만, 그 데이터는
+    rules.yaml provenance에 영구 기록되지 않는다(위 test_creates_new_rules_file과
+    대칭 — 같은 값이 dry-run에서는 보이되 파일에는 안 남아야 함)."""
+    log = tmp_path / "run.jsonl"
+    _run_log_with_failure(log)
+    output = tmp_path / "rules.yaml"
+
+    result = runner.invoke(
+        app, ["rule-from", str(log), "--event", "evt_0001", "-o", str(output), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not output.exists()
+    assert "후보별 회귀" in result.output
 
 
 def test_appends_to_existing_rules_file(tmp_path):
