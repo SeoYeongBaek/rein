@@ -1,0 +1,6 @@
+{"schema_version": "v1", "evt": "evt_0001", "seq": 1, "source": "tool_wrap", "parent_seq": null, "tool_name": "execute_sql", "args": {"query": "SELECT * FROM posts WHERE id = 1;"}, "context": {"agent_role": "content_editor"}, "verdict": "allow"}
+{"schema_version": "v1", "evt": "evt_0001", "seq": 1, "source": "outcome", "parent_seq": 1, "tool_name": "execute_sql", "outcome": {"status": "ok", "side_effect": null, "severity": "info", "detail": null}}
+{"schema_version": "v1", "evt": "evt_0002", "seq": 2, "source": "tool_wrap", "parent_seq": null, "tool_name": "execute_sql", "args": {"query": "UPDATE posts SET body = 'Updated notice' WHERE id = 1;"}, "context": {"agent_role": "content_editor"}, "verdict": "allow"}
+{"schema_version": "v1", "evt": "evt_0002", "seq": 2, "source": "outcome", "parent_seq": 2, "tool_name": "execute_sql", "outcome": {"status": "ok", "side_effect": null, "severity": "info", "detail": null}}
+{"schema_version": "v1", "evt": "evt_0003", "seq": 3, "source": "tool_wrap", "parent_seq": null, "tool_name": "execute_sql", "args": {"query": "SELECT * FROM posts WHERE id = 1;"}, "context": {"agent_role": "content_editor"}, "verdict": "allow"}
+{"schema_version": "v1", "evt": "evt_0003", "seq": 3, "source": "outcome", "parent_seq": 3, "tool_name": "execute_sql", "outcome": {"status": "ok", "side_effect": null, "severity": "info", "detail": null}}
