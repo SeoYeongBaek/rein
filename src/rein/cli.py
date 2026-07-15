@@ -446,8 +446,32 @@ def _print_dry_run(rule_doc: dict[str, Any], negatives: list[dict[str, Any]]) ->
     for key in ("id", "origin", "when", "scope", "then", "rationale"):
         summary.add_row(key, str(rule_body.get(key)))
     for key, value in rule_body["provenance"].items():
+        if key == "candidate_trail":
+            continue  # 아래 별도 표(§11 요소③ 후보 회귀 표)로 렌더링
         summary.add_row(f"provenance.{key}", str(value))
     console.print(summary)
+
+    trail = Table(title="후보별 회귀 (depth 1→2→3, §11 요소③)", show_lines=False)
+    trail.add_column("depth")
+    trail.add_column("when")
+    trail.add_column("scope")
+    trail.add_column("회귀 건수")
+    trail.add_column("회귀 evt")
+    chosen_depth = rule_body["provenance"]["generality_rank"]
+    for entry in rule_body["provenance"]["candidate_trail"]:
+        depth_label = f"{entry['depth']}/3"
+        is_chosen = depth_label == chosen_depth
+        depth_text = f"[green]{depth_label} (채택)[/green]" if is_chosen else depth_label
+        count_text = str(len(entry["regressions"]))
+        count_text = f"[red]{count_text}[/red]" if entry["regressions"] else count_text
+        trail.add_row(
+            depth_text,
+            str(entry["when"]),
+            str(entry["scope"]),
+            count_text,
+            ", ".join(entry["regressions"]) or "-",
+        )
+    console.print(trail)
 
     matrix = Table(title="회귀 매트릭스 (음성 코퍼스)", show_lines=False)
     matrix.add_column("evt")
@@ -614,6 +638,7 @@ def rule_from(
         "blocks": candidate["blocks"],
         "regressions": candidate["regressions"],
         "generality_rank": candidate["generality_rank"],
+        "candidate_trail": candidate["candidate_trail"],
         "extractor": f"sqlglot=={importlib.metadata.version('sqlglot')}",
         "tool_sig": _tool_sig(tool_name, born_from.get("args") or {}),
         "feature_schema": rules.FEATURE_SCHEMA_VERSION,

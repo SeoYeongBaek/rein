@@ -104,6 +104,9 @@ def test_creates_new_rules_file(tmp_path):
     assert rule["provenance"]["born_from"] == "evt_0001"
     assert rule["provenance"]["blocks"] == ["evt_0001"]
     assert rule["provenance"]["regressions"] == []
+    trail = rule["provenance"]["candidate_trail"]
+    assert [entry["depth"] for entry in trail] == [1, 2, 3]
+    assert all("regressions" in entry for entry in trail)
 
 
 def test_appends_to_existing_rules_file(tmp_path):
