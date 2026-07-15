@@ -483,6 +483,10 @@ def rule_from(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="후보 규칙과 회귀 매트릭스만 출력, 파일에 쓰지 않음")
     ] = False,
+    config: Annotated[
+        str,
+        typer.Option("--config", help="§5.2 권한 테이블(permissions:) 등을 읽을 rein.yaml 경로"),
+    ] = "rein.yaml",
 ):
     """실패 이벤트로부터 후보 규칙을 합성하고 회귀 검증 후 동결한다.
 
@@ -517,6 +521,19 @@ def rule_from(
     when.tool 비교가 자연히 걸러낸다). agent.role 역시 두 경로 모두 음성
     "선정" 단계에서는 필터 조건이 아니다. role은 오직 synthesize_rule의
     depth=3 scope.agent.role 매칭에서만 개입한다.
+
+    §5.2 권한 테이블 확정(이슈 #11): --golden 미지정 시 위 log 기반 negatives에
+    더해, `--config`(기본 rein.yaml)의 `permissions:` 섹션(role -> tool ->
+    허용 class 목록)에서도 합성 negatives를 추가로 뽑는다
+    (rules.permission_table_negatives). log 기반 negatives는 로그에 실제로
+    찍힌 호출만 보므로, 해당 role/class 조합이 로그에 아예 없으면(진짜 콜드
+    스타트) depth 2/3 후보를 검증할 신호가 없어 §7 "틀려도 안전한 방향"에
+    따라 항상 depth=3(가장 좁은 scope)으로만 수렴한다. 권한 테이블은 로그에
+    없어도 "이 role은 이 class를 써도 된다"는 선언적 사실을 CANONICAL_SQL_BY_CLASS로
+    fabricate해 이 공백을 메운다. rein.yaml에 permissions가 없으면(또는
+    파일 자체가 없으면) 조용히 빈 리스트만 추가되고 log 기반 negatives만으로
+    기존과 동일하게 동작한다 — 이 테이블은 신뢰도 게이팅(§7 안전장치 ③, 별도
+    이슈)과는 다른 축이라 여기서 좁게 시작해 넓히는 로직은 다루지 않는다.
     """
     log_path = Path(log)
     if not log_path.exists():
@@ -547,7 +564,10 @@ def rule_from(
         validated_against = golden
     else:
         negatives = _cold_start_negatives(events, born_from)
-        validated_against = log
+        permission_table = rules.load_permission_table(config)
+        permission_negatives = rules.permission_table_negatives(born_from, permission_table)
+        negatives = negatives + permission_negatives
+        validated_against = f"{log} (+ {config} permissions)" if permission_negatives else log
 
     candidate = rules.synthesize_rule(born_from, negatives)
 

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from rein.rules import featurize, synthesize_rule
+from rein.rules import (
+    featurize,
+    load_permission_table,
+    permission_table_negatives,
+    synthesize_rule,
+)
 
 
 def _evt(
@@ -153,3 +158,79 @@ def test_synthesize_rule_non_sql_born_from_only_has_depth1():
     assert rule["generality_rank"] == "1/3"
     assert rule["when"] == {"tool": "delete_file"}
     assert rule["scope"] is None
+
+
+# ── permission_table_negatives / load_permission_table (§5.2, 이슈 #11) ───────
+
+
+def test_permission_table_negatives_fabricates_per_role_per_class():
+    """role별 허용 class마다 대표 SQL로 합성 음성 하나씩 나온다. born_from과
+    같은 (role, class) 조합(content_editor의 DDL_DESTRUCTIVE)은 제외된다."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    table = {
+        "content_editor": {"execute_sql": ["SQL_SAFE"]},
+        "admin": {"execute_sql": ["SQL_SAFE", "DDL_DESTRUCTIVE", "DML_DESTRUCTIVE"]},
+    }
+
+    negatives = permission_table_negatives(born_from, table)
+
+    by_role_class = {(n["context"]["agent_role"], featurize(n["args"])["class"]) for n in negatives}
+    assert ("content_editor", "SQL_SAFE") in by_role_class
+    assert ("admin", "SQL_SAFE") in by_role_class
+    assert ("admin", "DDL_DESTRUCTIVE") in by_role_class
+    assert ("admin", "DML_DESTRUCTIVE") in by_role_class
+    assert ("content_editor", "DDL_DESTRUCTIVE") not in by_role_class
+    assert all(n["tool_name"] == "execute_sql" and n["verdict"] == "allow" for n in negatives)
+
+
+def test_permission_table_negatives_ignores_other_tools():
+    """born_from과 다른 tool_name에 대한 권한 항목은 무시된다 — synthesize_rule의
+    후보가 when.tool을 born_from 도구로 고정해서 아무 신호도 못 주기 때문."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    table = {"admin": {"delete_file": ["SQL_SAFE"]}}
+
+    assert permission_table_negatives(born_from, table) == []
+
+
+def test_permission_table_negatives_lets_synthesize_rule_generalize_without_log_evidence():
+    """log에 다른 호출이 전혀 없어도(negatives=[] 상황), 권한 테이블 기반 합성 음성만
+    으로 depth2까지 안전하게 일반화된다 — 순수 log 기반이었다면 depth3(가장 좁은
+    scope)에 그쳤을 상황(test_synthesize_rule_no_negatives_picks_narrowest_depth
+    참고)."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    table = {"content_editor": {"execute_sql": ["SQL_SAFE"]}}
+
+    negatives = permission_table_negatives(born_from, table)
+    rule = synthesize_rule(born_from, negatives)
+
+    assert rule["generality_rank"] == "2/3"
+    assert rule["scope"] is None
+    assert rule["regressions"] == []
+
+
+def test_load_permission_table_missing_file_returns_empty(tmp_path):
+    assert load_permission_table(tmp_path / "no_such_rein.yaml") == {}
+
+
+def test_load_permission_table_missing_key_returns_empty(tmp_path):
+    config = tmp_path / "rein.yaml"
+    config.write_text("stage_order: [schema, permission, budget, safety]\n", encoding="utf-8")
+
+    assert load_permission_table(config) == {}
+
+
+def test_load_permission_table_reads_permissions_section(tmp_path):
+    config = tmp_path / "rein.yaml"
+    config.write_text(
+        "permissions:\n"
+        "  content_editor:\n"
+        "    execute_sql: [SQL_SAFE]\n"
+        "  admin:\n"
+        "    execute_sql: [SQL_SAFE, DDL_DESTRUCTIVE, DML_DESTRUCTIVE]\n",
+        encoding="utf-8",
+    )
+
+    table = load_permission_table(config)
+
+    assert table["content_editor"]["execute_sql"] == ["SQL_SAFE"]
+    assert table["admin"]["execute_sql"] == ["SQL_SAFE", "DDL_DESTRUCTIVE", "DML_DESTRUCTIVE"]

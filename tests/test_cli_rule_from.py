@@ -275,6 +275,82 @@ def test_cold_start_negatives_excludes_mistagged_destructive_event():
     assert negatives == []
 
 
+# ── 권한 테이블 기반 합성 음성 (§5.2, 이슈 #11) ──────────────────────────────
+
+
+def test_rule_from_uses_permission_table_when_no_golden(tmp_path):
+    """--golden도 없고 log에 다른 호출도 전혀 없어도, --config로 넘긴 rein.yaml의
+    permissions 섹션만으로 depth2(tool+class)까지 안전하게 일반화된다."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(
+        log,
+        [
+            _tool_wrap(
+                0,
+                "execute_sql",
+                "DROP TABLE users;",
+                verdict="allow",
+                severity="critical",
+                role="content_editor",
+            ),
+        ],
+    )
+    config = tmp_path / "rein.yaml"
+    config.write_text(
+        "permissions:\n  content_editor:\n    execute_sql: [SQL_SAFE]\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rules.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "rule-from",
+            str(log),
+            "--event",
+            "evt_0000",
+            "-o",
+            str(output),
+            "--config",
+            str(config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    doc = next(yaml.safe_load_all(output.read_text(encoding="utf-8")))
+    rule = doc["rule"]
+    assert rule["provenance"]["generality_rank"] == "2/3"
+    assert rule["provenance"]["regressions"] == []
+    assert "permissions" in rule["provenance"]["validated_against"]
+
+
+def test_rule_from_without_permissions_section_falls_back_to_log_only(tmp_path):
+    """rein.yaml이 없으면(기본 경로에 파일 자체가 없음) 조용히 스킵되고 기존
+    log 기반 negatives만으로 동작한다 — 파일 부재가 rule-from 자체를 막지 않는다."""
+    log = tmp_path / "run.jsonl"
+    _run_log_with_failure(log)
+    output = tmp_path / "rules.yaml"
+    missing_config = tmp_path / "no_such_rein.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "rule-from",
+            str(log),
+            "--event",
+            "evt_0001",
+            "-o",
+            str(output),
+            "--config",
+            str(missing_config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    doc = next(yaml.safe_load_all(output.read_text(encoding="utf-8")))
+    assert doc["rule"]["provenance"]["validated_against"] == str(log)
+
+
 def test_cold_start_negatives_excludes_non_sql_even_if_tagged_info():
     """featurize가 실패하는(비-SQL) 이벤트는 로그 severity가 "info"여도
     검증 불가로 간주해 자동 제외된다."""
