@@ -264,14 +264,30 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
     negatives가 §11 콜드 스타트 필터(같은 tool, severity=="info")를 거쳤거나
     --golden 코퍼스가 실제로 안전한 호출만 담고 있다는 전제 위에서만 성립한다.
 
-    negatives가 아예 비어 있으면("증거 0건") depth 1→2→3 순회를 하지 않고
-    바로 가장 좁은(도달 가능한 가장 깊은) 후보를 채택한다. 순회 방식은
-    "회귀가 안 남 = 그 depth가 안전하다고 검증됨"을 전제하는데, negatives가
-    비어 있으면 어떤 depth를 골라도 회귀가 0건으로 나와 얕은(넓은) depth부터
-    통과해버린다 — 이는 "검증됨"이 아니라 "검증할 음성이 없었을 뿐"이다.
-    증거가 없는 상태에서 가장 넓게 일반화하면 §7 "틀려도 안전한 방향으로"
-    원칙과 정반대(SELECT 같은 무해한 호출까지 막는 과대차단)가 되므로,
-    이 경우만 별도로 가장 좁은 후보를 강제한다.
+    negatives가 아예 비어 있으면("증거 0건") 가장 좁은(도달 가능한 가장 깊은)
+    후보를 채택한다. "회귀가 안 남 = 그 depth가 안전하다고 검증됨"을
+    전제하는데, negatives가 비어 있으면 어떤 depth를 골라도 회귀가 0건으로
+    나와 얕은(넓은) depth부터 통과해버린다 — 이는 "검증됨"이 아니라 "검증할
+    음성이 없었을 뿐"이다. 증거가 없는 상태에서 가장 넓게 일반화하면 §7
+    "틀려도 안전한 방향으로" 원칙과 정반대(SELECT 같은 무해한 호출까지 막는
+    과대차단)가 되므로, 이 경우만 별도로 가장 좁은 후보를 강제한다.
+
+    반환값의 `candidate_trail`은 depth 1~3 후보 전부(채택된 depth 이후 것도
+    포함)의 (when/scope/regressions)를 담는다 — §11 리포트 요소③(후보 회귀
+    표: "가장 얕은 통과 depth가 왜 채택됐는지 보여줌")가 채택 depth 하나만으론
+    설명이 안 되고, 얕은 depth들이 왜 탈락했는지(회귀 목록)까지 필요하기
+    때문이다(#53). 회귀 판정 자체는 depth마다 독립적으로 다시 계산하므로
+    이전처럼 "루프가 break를 못 타면 마지막 값이 남는" 부수효과에 기대지
+    않는다.
+
+    `blocks`는 `[born_from["evt"]]`를 그냥 하드코딩하지 않고, negatives에
+    회귀를 세는 것과 같은 `rule_matches`로 채택된 후보가 born_from 자신을
+    실제로 매칭하는지 검증해서 채운다 — "완료 기준: 검증 코퍼스에 돌려
+    산출"이 regressions(음성)뿐 아니라 blocks(양성 1건)에도 동일하게
+    적용돼야 하기 때문이다. `_candidate()`가 매번 born_from 자신의
+    tool/class/role로 후보를 구성하므로 이 매칭은 구성상 항상 참이지만,
+    "항상 참이니 계산을 생략한다"가 아니라 "항상 참임을 실제로 검증한다"는
+    쪽을 택한다 — 값은 같아도 하드코딩과 검증은 다른 보장 수준이다.
     """
     tool_name = born_from["tool_name"]
     role = (born_from.get("context") or {}).get("agent_role")
@@ -284,29 +300,33 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
         if role is not None:
             candidates.append(_candidate(tool_name, klass, role, depth=3))
 
-    chosen = candidates[-1]
-    chosen_regressions: list[str] = []
+    trail: list[dict[str, Any]] = [
+        {
+            "depth": candidate["depth"],
+            "when": candidate["when"],
+            "scope": candidate["scope"],
+            "regressions": [neg["evt"] for neg in negatives if rule_matches(candidate, neg)],
+        }
+        for candidate in candidates
+    ]
+
+    # negatives가 비어 있으면("증거 0건") 모든 depth가 트리비얼하게 회귀
+    # 0건이므로, 첫 번째(가장 얕은) 항목을 그대로 고르면 §7 원칙과 반대로
+    # 가장 넓게 일반화해버린다 — 이 경우만 가장 좁은 항목을 강제한다.
     if negatives:
-        # depth 1~3 전부 회귀가 나면 아래 for 루프가 break를 못 타서 마지막
-        # candidate(candidates[-1])의 regressions가 루프 변수에 남은 채로
-        # chosen_regressions에 그대로 쓰인다. 이 함수는 값을 계산해서 돌려줄
-        # 뿐 판단하지 않는다 — §7 "양성 전부 차단 ∧ 음성 0회귀" 채택 기준을
-        # 실제로 강제하는 건 호출자(cli.py rule_from())의 몫이다: non-dry-run
-        # 경로에서 이 필드가 비어있지 않으면 파일에 쓰지 않고 typer.Exit(1)로
-        # fail-closed 한다.
-        regressions: list[str] = []
-        for candidate in candidates:
-            regressions = [neg["evt"] for neg in negatives if rule_matches(candidate, neg)]
-            if not regressions:
-                chosen = candidate
-                break
-        chosen_regressions = regressions
+        chosen_entry = next((entry for entry in trail if not entry["regressions"]), trail[-1])
+    else:
+        chosen_entry = trail[-1]
+
+    chosen_rule = {"when": chosen_entry["when"], "scope": chosen_entry["scope"]}
+    blocks = [born_from["evt"]] if rule_matches(chosen_rule, born_from) else []
 
     return {
-        "when": chosen["when"],
-        "scope": chosen["scope"],
+        "when": chosen_entry["when"],
+        "scope": chosen_entry["scope"],
         "then": "deny",
-        "blocks": [born_from["evt"]],
-        "regressions": chosen_regressions,
-        "generality_rank": f"{chosen['depth']}/3",
+        "blocks": blocks,
+        "regressions": chosen_entry["regressions"],
+        "generality_rank": f"{chosen_entry['depth']}/3",
+        "candidate_trail": trail,
     }

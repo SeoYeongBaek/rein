@@ -10,6 +10,7 @@ from rein.rules import (
     featurize,
     load_permission_table,
     permission_table_negatives,
+    rule_matches,
     synthesize_rule,
 )
 
@@ -293,3 +294,96 @@ def test_permission_table_negatives_rejects_non_dict_tools_even_without_load():
 
     with pytest.raises(ValueError, match="admin"):
         permission_table_negatives(born_from, table)
+
+
+# ── candidate_trail (§11 요소③ 후보 회귀 표 데이터, 이슈 #53) ─────────────────
+
+
+def test_candidate_trail_shows_why_shallow_depths_were_rejected():
+    """depth3이 채택돼도 candidate_trail에는 depth1(다른 role 회귀 포함)/depth2가
+    왜 탈락했는지(회귀 evt 목록)가 그대로 남아 있어야 한다 — 채택된 depth
+    하나만으로는 '가장 얕은 통과 depth가 왜 채택됐는지'를 설명할 수 없다."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    negatives = [
+        _evt("evt_0001", "execute_sql", "SELECT * FROM posts;", role="content_editor"),
+        _evt("evt_0002", "execute_sql", "DROP TABLE tmp_scratch;", role="dba"),
+    ]
+
+    rule = synthesize_rule(born_from, negatives)
+
+    trail = {entry["depth"]: entry for entry in rule["candidate_trail"]}
+    assert set(trail) == {1, 2, 3}
+    assert trail[1]["regressions"] == ["evt_0001", "evt_0002"]
+    assert trail[2]["regressions"] == ["evt_0002"]
+    assert trail[3]["regressions"] == []
+    assert rule["generality_rank"] == "3/3"
+
+
+def test_candidate_trail_all_depths_regress_keeps_full_trail():
+    """depth 1~3 전부 회귀가 나는 경우(cli.py의 fail-closed 게이트가 나중에
+    이 값을 보고 거절)에도 candidate_trail은 3개 항목 모두를 담아야
+    회귀 원인을 감사할 수 있다."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    negatives = [
+        _evt("evt_0001", "execute_sql", "DROP TABLE tmp_scratch;", role="content_editor"),
+    ]
+
+    rule = synthesize_rule(born_from, negatives)
+
+    trail = {entry["depth"]: entry for entry in rule["candidate_trail"]}
+    assert set(trail) == {1, 2, 3}
+    assert trail[3]["regressions"] == ["evt_0001"]
+    assert rule["regressions"] == ["evt_0001"]
+    assert rule["generality_rank"] == "3/3"
+    assert rule["blocks"] == ["evt_0042"]  # 회귀가 남아도 born_from 자신은 항상 막는다
+
+
+# ── blocks (하드코딩이 아니라 rule_matches로 검증해서 산출, 완료 기준 재정합) ──
+
+
+def test_blocks_is_verified_via_rule_matches_not_hardcoded():
+    """blocks는 `[born_from["evt"]]`를 그냥 박아넣는 게 아니라, 채택된 규칙의
+    when/scope로 born_from을 rule_matches에 실제로 통과시켜서 얻은 값과
+    같아야 한다 — regressions가 negatives를 rule_matches로 검증하는 것과
+    같은 방식을 born_from(양성 1건)에도 적용한다."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    negatives = [
+        _evt("evt_0001", "execute_sql", "SELECT * FROM posts;", role="content_editor"),
+    ]
+
+    rule = synthesize_rule(born_from, negatives)
+
+    positive_rule = {"when": rule["when"], "scope": rule["scope"]}
+    assert rule_matches(positive_rule, born_from)
+    assert rule["blocks"] == ([born_from["evt"]] if rule_matches(positive_rule, born_from) else [])
+
+
+def test_blocks_holds_for_non_sql_depth1_only_candidate():
+    """featurize가 실패하는 도구(depth1만 후보에 듦)에서도 blocks가 born_from을
+    실제로 매칭해서 채워진다."""
+    born_from = {
+        "evt": "evt_0099",
+        "seq": 99,
+        "source": "tool_wrap",
+        "tool_name": "delete_file",
+        "args": {"path": "/tmp/x"},
+        "context": {"agent_role": "content_editor"},
+        "verdict": "allow",
+        "outcome": {"status": "ok", "severity": "critical", "detail": ""},
+    }
+
+    rule = synthesize_rule(born_from, negatives=[])
+
+    assert rule["blocks"] == ["evt_0099"]
+
+
+def test_candidate_trail_empty_negatives_reports_zero_regressions_for_all_depths():
+    """negatives=[]("증거 0건")이어도 candidate_trail 자체는 각 depth의
+    (트리비얼한) 0회귀를 보여준다 — 채택은 여전히 가장 좁은 depth로
+    강제되지만(§7 원칙), trail 데이터는 실제 계산 결과를 숨기지 않는다."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+
+    rule = synthesize_rule(born_from, negatives=[])
+
+    assert [entry["regressions"] for entry in rule["candidate_trail"]] == [[], [], []]
+    assert rule["generality_rank"] == "3/3"
