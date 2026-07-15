@@ -279,6 +279,15 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
     때문이다(#53). 회귀 판정 자체는 depth마다 독립적으로 다시 계산하므로
     이전처럼 "루프가 break를 못 타면 마지막 값이 남는" 부수효과에 기대지
     않는다.
+
+    `blocks`는 `[born_from["evt"]]`를 그냥 하드코딩하지 않고, negatives에
+    회귀를 세는 것과 같은 `rule_matches`로 채택된 후보가 born_from 자신을
+    실제로 매칭하는지 검증해서 채운다 — "완료 기준: 검증 코퍼스에 돌려
+    산출"이 regressions(음성)뿐 아니라 blocks(양성 1건)에도 동일하게
+    적용돼야 하기 때문이다. `_candidate()`가 매번 born_from 자신의
+    tool/class/role로 후보를 구성하므로 이 매칭은 구성상 항상 참이지만,
+    "항상 참이니 계산을 생략한다"가 아니라 "항상 참임을 실제로 검증한다"는
+    쪽을 택한다 — 값은 같아도 하드코딩과 검증은 다른 보장 수준이다.
     """
     tool_name = born_from["tool_name"]
     role = (born_from.get("context") or {}).get("agent_role")
@@ -309,11 +318,14 @@ def synthesize_rule(born_from: dict[str, Any], negatives: list[dict[str, Any]]) 
     else:
         chosen_entry = trail[-1]
 
+    chosen_rule = {"when": chosen_entry["when"], "scope": chosen_entry["scope"]}
+    blocks = [born_from["evt"]] if rule_matches(chosen_rule, born_from) else []
+
     return {
         "when": chosen_entry["when"],
         "scope": chosen_entry["scope"],
         "then": "deny",
-        "blocks": [born_from["evt"]],
+        "blocks": blocks,
         "regressions": chosen_entry["regressions"],
         "generality_rank": f"{chosen_entry['depth']}/3",
         "candidate_trail": trail,

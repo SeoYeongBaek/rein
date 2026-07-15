@@ -10,6 +10,7 @@ from rein.rules import (
     featurize,
     load_permission_table,
     permission_table_negatives,
+    rule_matches,
     synthesize_rule,
 )
 
@@ -334,6 +335,46 @@ def test_candidate_trail_all_depths_regress_keeps_full_trail():
     assert trail[3]["regressions"] == ["evt_0001"]
     assert rule["regressions"] == ["evt_0001"]
     assert rule["generality_rank"] == "3/3"
+    assert rule["blocks"] == ["evt_0042"]  # 회귀가 남아도 born_from 자신은 항상 막는다
+
+
+# ── blocks (하드코딩이 아니라 rule_matches로 검증해서 산출, 완료 기준 재정합) ──
+
+
+def test_blocks_is_verified_via_rule_matches_not_hardcoded():
+    """blocks는 `[born_from["evt"]]`를 그냥 박아넣는 게 아니라, 채택된 규칙의
+    when/scope로 born_from을 rule_matches에 실제로 통과시켜서 얻은 값과
+    같아야 한다 — regressions가 negatives를 rule_matches로 검증하는 것과
+    같은 방식을 born_from(양성 1건)에도 적용한다."""
+    born_from = _evt("evt_0042", "execute_sql", "DROP TABLE users;", role="content_editor")
+    negatives = [
+        _evt("evt_0001", "execute_sql", "SELECT * FROM posts;", role="content_editor"),
+    ]
+
+    rule = synthesize_rule(born_from, negatives)
+
+    positive_rule = {"when": rule["when"], "scope": rule["scope"]}
+    assert rule_matches(positive_rule, born_from)
+    assert rule["blocks"] == ([born_from["evt"]] if rule_matches(positive_rule, born_from) else [])
+
+
+def test_blocks_holds_for_non_sql_depth1_only_candidate():
+    """featurize가 실패하는 도구(depth1만 후보에 듦)에서도 blocks가 born_from을
+    실제로 매칭해서 채워진다."""
+    born_from = {
+        "evt": "evt_0099",
+        "seq": 99,
+        "source": "tool_wrap",
+        "tool_name": "delete_file",
+        "args": {"path": "/tmp/x"},
+        "context": {"agent_role": "content_editor"},
+        "verdict": "allow",
+        "outcome": {"status": "ok", "severity": "critical", "detail": ""},
+    }
+
+    rule = synthesize_rule(born_from, negatives=[])
+
+    assert rule["blocks"] == ["evt_0099"]
 
 
 def test_candidate_trail_empty_negatives_reports_zero_regressions_for_all_depths():
