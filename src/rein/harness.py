@@ -56,7 +56,7 @@ class Harness:
         config: str = "rein.yaml",
         mode: Literal["record", "live-rerun"] = "record",
         replay_from: str | Path | None = None,
-        context: Any | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """
         Args:
@@ -153,7 +153,7 @@ class Harness:
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            ctx = self._context  # 추후 Context() 객체 연동 시 수정 -> none에서 self_context로 수정
+            ctx = self._context  # 추후 Context() 객체 연동 시 이 대입 로직을 재검토함.
             bound = _bound_args(args, kwargs)
             tool_call = {"name": func.__name__, "args": bound}
 
