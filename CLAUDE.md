@@ -220,13 +220,21 @@ live-rerun은 이 CLI 명령의 옵션이 아니다. 실제 도구 함수는 사
 트리거한다(§4 Harness 생성자 계약).
 
 ```
-rein rule-from <run.jsonl> --event evt_XXXX [--golden golden_run.jsonl] [-o rules.yaml] [--dry-run]
+rein rule-from <run.jsonl> --event evt_XXXX [--golden golden_run.jsonl] [-o rules.yaml] [--dry-run] [--config rein.yaml]
 ```
 `--dry-run`은 후보 규칙과 회귀 매트릭스만 출력하고 파일에 쓰지 않는다
 (PR 전 리뷰용). 기존 `rules.yaml`이 있으면 덮어쓰지 않고 append하며
 `born_from`/`blocks`/`regressions`는 §8 그대로 채운다. `--golden`을
 안 주면 §7 콜드 스타트 안전장치 ②(합성 음성, 권한 테이블에서 도출)를
-쓴다 — 정확한 도출 알고리즘은 TODO: 가희 확정.
+쓴다 — 도출 알고리즘 확정(이슈 #11): log 안의 실제 호출(같은 tool_name +
+verdict==allow + 재계산 severity==info)에 더해, `--config`(기본
+`rein.yaml`)의 `permissions:` 섹션(role -> tool -> 허용 class 목록)에서
+role별로 허용된 클래스마다 대표 SQL 한 줄(`SELECT 1` / `DROP TABLE ...` /
+`DELETE FROM ...`)을 합성 음성 이벤트로 fabricate해 추가한다. log에 실제
+호출이 없는 role·class 조합도 이 방식으로 회귀 검증에 반영되므로, 로그가
+빈약해도 depth 2/3(§7 빔서치)까지 안전하게 일반화할 수 있다. `rein.yaml`에
+`permissions`가 없으면 이 보강은 조용히 스킵되고 기존 log 기반 negatives만
+쓰인다(fail-closed 대상 아님 — 없다고 규칙 생성 자체가 막히지 않는다).
 
 ```
 rein report <run.jsonl> --rules rules.yaml [-o report.html]
@@ -447,11 +455,44 @@ n번째 인터셉트 호출은 무조건 로그의 n번째 `tool_wrap` 이벤트
 쌓이면 넓힘). 최악의 경우에도 "틀려도 안전한 방향"(과소차단 회피)으로
 틀리게 설계한다.
 
-`rein rule-from`에 `--golden`이 없을 때는 ②가 자동 발동한다.
-`born_from` 이벤트와 다른 `(tool_name, agent.role)` 조합으로 찍힌
-`run.jsonl` 내 정상 호출들을 합성 음성으로 삼는 것이 최소 해석이지만,
-**권한 테이블에서 정확히 어떻게 음성을 도출할지 구체 알고리즘은 아직
-미정 — TODO: 가희 확정** (회귀 엔진 소유자 판단 영역).
+`rein rule-from`에 `--golden`이 없을 때는 ②가 자동 발동한다. 두 소스를
+합쳐서 음성 코퍼스를 만든다(이슈 #11 확정, 회귀 엔진 소유자 판단 영역):
+
+1. **log 기반** — `run.jsonl` 안에서 `born_from`과 같은 `tool_name` +
+   `verdict==allow` + (featurize로 재계산한) `severity==info`인 다른
+   호출들. `agent.role`은 필터 조건이 아니다(같은 role의 무해한 호출,
+   다른 role의 같은 도구 호출 둘 다 유효한 음성).
+2. **권한 테이블 기반** — `rein.yaml`의 `permissions:` 섹션(role -> tool
+   -> 허용 class 목록)을 읽어, `born_from`과 같은 tool에 대해 role별로
+   허용된 class마다 대표 SQL(`SQL_SAFE`→`SELECT 1`,
+   `DDL_DESTRUCTIVE`→`DROP TABLE ...`, `DML_DESTRUCTIVE`→`DELETE FROM
+   ...`)로 합성 음성 이벤트를 fabricate한다.
+
+   ```yaml
+   # rein.yaml
+   permissions:
+     content_editor:
+       execute_sql: [SQL_SAFE]
+     admin:
+       execute_sql: [SQL_SAFE, DDL_DESTRUCTIVE, DML_DESTRUCTIVE]
+   ```
+
+   1번(log 기반)만으로는 로그에 아예 등장한 적 없는 role/class 조합을
+   검증할 신호가 없어 §7 빔서치가 항상 depth=3(가장 좁은 scope)으로만
+   수렴한다 — 실제로는 여러 role에 두루 안전한 class라도 로그가 빈약하면
+   절대 일반화되지 못한다는 뜻이다. 권한 테이블은 로그 유무와 무관하게
+   "이 role은 이 class를 써도 된다"는 선언적 사실 자체를 신호로 주입해서
+   이 공백을 메운다. `tool_name`은 `born_from`과 같은 도구만 다룬다 —
+   §7 빔서치 후보들이 `when.tool`을 `born_from` 도구로 고정하므로 다른
+   도구의 권한 항목은 애초에 검증에 반영될 수 없기 때문이다.
+   `born_from`과 정확히 같은 `(role, tool, class)` 조합은 제외한다(그
+   조합은 지금 막으려는 실패 그 자체이므로 negative로 셀 수 없다).
+   `rein.yaml`에 `permissions`가 없거나 파일 자체가 없으면 이 소스는
+   조용히 빈 리스트가 되고 1번만으로 기존과 동일하게 동작한다 — 이
+   테이블이 없다고 규칙 생성 자체가 막히는 것은 아니라는 뜻이다.
+
+**스코프 밖**: 위 ①·②는 콜드 스타트 안전장치이고, ③ 신뢰도 게이팅(좁게
+시작해 쌓이면 넓히는 로직)은 별도 이슈에서 다룬다 — 혼동하지 않는다.
 
 ### 킬러 데모 A/B 시나리오 (#46 확정)
 

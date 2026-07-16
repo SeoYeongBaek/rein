@@ -104,6 +104,26 @@ def test_creates_new_rules_file(tmp_path):
     assert rule["provenance"]["born_from"] == "evt_0001"
     assert rule["provenance"]["blocks"] == ["evt_0001"]
     assert rule["provenance"]["regressions"] == []
+    # candidate_trail은 코퍼스 크기에 비례해 커질 수 있어(§8 나머지 필드와
+    # 성격이 다름) rules.yaml에는 쓰지 않는다 — dry-run 콘솔 출력 전용.
+    assert "candidate_trail" not in rule["provenance"]
+
+
+def test_dry_run_shows_candidate_trail_but_does_not_persist_it(tmp_path):
+    """--dry-run 콘솔에는 depth별 후보 회귀 표가 보이지만, 그 데이터는
+    rules.yaml provenance에 영구 기록되지 않는다(위 test_creates_new_rules_file과
+    대칭 — 같은 값이 dry-run에서는 보이되 파일에는 안 남아야 함)."""
+    log = tmp_path / "run.jsonl"
+    _run_log_with_failure(log)
+    output = tmp_path / "rules.yaml"
+
+    result = runner.invoke(
+        app, ["rule-from", str(log), "--event", "evt_0001", "-o", str(output), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not output.exists()
+    assert "후보별 회귀" in result.output
 
 
 def test_appends_to_existing_rules_file(tmp_path):
@@ -273,6 +293,86 @@ def test_cold_start_negatives_excludes_mistagged_destructive_event():
     negatives = _cold_start_negatives([mistagged_negative, born_from], born_from)
 
     assert negatives == []
+
+
+# ── 권한 테이블 기반 합성 음성 (§5.2, 이슈 #11) ──────────────────────────────
+
+
+def test_rule_from_uses_permission_table_when_no_golden(tmp_path):
+    """--golden도 없고 log에 다른 호출도 전혀 없어도, --config로 넘긴 rein.yaml의
+    permissions 섹션만으로 depth2(tool+class)까지 안전하게 일반화된다."""
+    log = tmp_path / "run.jsonl"
+    _write_jsonl(
+        log,
+        [
+            _tool_wrap(
+                0,
+                "execute_sql",
+                "DROP TABLE users;",
+                verdict="allow",
+                severity="critical",
+                role="content_editor",
+            ),
+        ],
+    )
+    config = tmp_path / "rein.yaml"
+    config.write_text(
+        "permissions:\n  content_editor:\n    execute_sql: [SQL_SAFE]\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rules.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "rule-from",
+            str(log),
+            "--event",
+            "evt_0000",
+            "-o",
+            str(output),
+            "--config",
+            str(config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    doc = next(yaml.safe_load_all(output.read_text(encoding="utf-8")))
+    rule = doc["rule"]
+    assert rule["provenance"]["generality_rank"] == "2/3"
+    assert rule["provenance"]["regressions"] == []
+    assert "permissions" in rule["provenance"]["validated_against"]
+
+
+def test_rule_from_without_permissions_section_falls_back_to_log_only(tmp_path):
+    """rein.yaml이 없으면(기본 경로에 파일 자체가 없음) 조용히 스킵되고 기존
+    log 기반 negatives만으로 동작한다 — 파일 부재가 rule-from 자체를 막지 않는다."""
+    log = tmp_path / "run.jsonl"
+    _run_log_with_failure(log)
+    output = tmp_path / "rules.yaml"
+    missing_config = tmp_path / "no_such_rein.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "rule-from",
+            str(log),
+            "--event",
+            "evt_0001",
+            "-o",
+            str(output),
+            "--config",
+            str(missing_config),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    doc = next(yaml.safe_load_all(output.read_text(encoding="utf-8")))
+    validated_against = doc["rule"]["provenance"]["validated_against"]
+    assert str(log) in validated_against
+    assert "permissions" not in validated_against
+    assert "cold-start subset" in validated_against
+    assert "born_from=evt_0001" in validated_against
 
 
 def test_cold_start_negatives_excludes_non_sql_even_if_tagged_info():

@@ -437,7 +437,24 @@ def _rationale(tool_name: str, klass: str | None, role: str | None, scoped: bool
     return f"{prefix}{tool_name}의 {klass} 호출은 차단 대상"
 
 
-def _print_dry_run(rule_doc: dict[str, Any], negatives: list[dict[str, Any]]) -> None:
+def _print_dry_run(
+    rule_doc: dict[str, Any],
+    negatives: list[dict[str, Any]],
+    candidate_trail: list[dict[str, Any]],
+) -> None:
+    """후보 규칙 요약 + 후보별 회귀(depth 1→2→3) + 회귀 매트릭스를 출력한다.
+
+    candidate_trail은 일부러 rule_doc(=rules.yaml에 그대로 쓰일 provenance)에
+    넣지 않고 별도 인자로 받는다 — depth1처럼 좁혀지지 않은 후보는 골든
+    코퍼스 전체를 매칭시켜버려 evt 목록이 코퍼스 크기만큼 불어나는데, 이걸
+    rules.yaml에 영구 기록하면 규칙 하나당 크기가 코퍼스 크기에 비례해
+    §8의 나머지 필드(전부 "그 규칙에 대한 요약값"이라 크기가 예측 가능함)와
+    성격이 달라진다. 이 표는 --dry-run 시점의 일회성 디버그 정보로만
+    남기고, rein report가 나중에 이 데이터가 필요하면 born_from +
+    validated_against로 synthesize_rule을 다시 돌려 재계산한다(로그가
+    바뀌면 재계산이 더 정확하기도 하다 — 영구 저장분은 그 시점 스냅샷일
+    뿐이라 오히려 오해를 줄 수 있다).
+    """
     rule_body = rule_doc["rule"]
 
     summary = Table(title="후보 규칙", show_lines=False)
@@ -448,6 +465,31 @@ def _print_dry_run(rule_doc: dict[str, Any], negatives: list[dict[str, Any]]) ->
     for key, value in rule_body["provenance"].items():
         summary.add_row(f"provenance.{key}", str(value))
     console.print(summary)
+
+    trail = Table(
+        title="후보별 회귀 (depth 1→2→3, §11 요소③ — dry-run 전용, rules.yaml에 저장되지 않음)",
+        show_lines=False,
+    )
+    trail.add_column("depth")
+    trail.add_column("when")
+    trail.add_column("scope")
+    trail.add_column("회귀 건수")
+    trail.add_column("회귀 evt")
+    chosen_depth = rule_body["provenance"]["generality_rank"]
+    for entry in candidate_trail:
+        depth_label = f"{entry['depth']}/3"
+        is_chosen = depth_label == chosen_depth
+        depth_text = f"[green]{depth_label} (채택)[/green]" if is_chosen else depth_label
+        count_text = str(len(entry["regressions"]))
+        count_text = f"[red]{count_text}[/red]" if entry["regressions"] else count_text
+        trail.add_row(
+            depth_text,
+            str(entry["when"]),
+            str(entry["scope"]),
+            count_text,
+            ", ".join(entry["regressions"]) or "-",
+        )
+    console.print(trail)
 
     matrix = Table(title="회귀 매트릭스 (음성 코퍼스)", show_lines=False)
     matrix.add_column("evt")
@@ -483,6 +525,10 @@ def rule_from(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="후보 규칙과 회귀 매트릭스만 출력, 파일에 쓰지 않음")
     ] = False,
+    config: Annotated[
+        str,
+        typer.Option("--config", help="§5.2 권한 테이블(permissions:) 등을 읽을 rein.yaml 경로"),
+    ] = "rein.yaml",
 ):
     """실패 이벤트로부터 후보 규칙을 합성하고 회귀 검증 후 동결한다.
 
@@ -517,6 +563,19 @@ def rule_from(
     when.tool 비교가 자연히 걸러낸다). agent.role 역시 두 경로 모두 음성
     "선정" 단계에서는 필터 조건이 아니다. role은 오직 synthesize_rule의
     depth=3 scope.agent.role 매칭에서만 개입한다.
+
+    §5.2 권한 테이블 확정(이슈 #11): --golden 미지정 시 위 log 기반 negatives에
+    더해, `--config`(기본 rein.yaml)의 `permissions:` 섹션(role -> tool ->
+    허용 class 목록)에서도 합성 negatives를 추가로 뽑는다
+    (rules.permission_table_negatives). log 기반 negatives는 로그에 실제로
+    찍힌 호출만 보므로, 해당 role/class 조합이 로그에 아예 없으면(진짜 콜드
+    스타트) depth 2/3 후보를 검증할 신호가 없어 §7 "틀려도 안전한 방향"에
+    따라 항상 depth=3(가장 좁은 scope)으로만 수렴한다. 권한 테이블은 로그에
+    없어도 "이 role은 이 class를 써도 된다"는 선언적 사실을 CANONICAL_SQL_BY_CLASS로
+    fabricate해 이 공백을 메운다. rein.yaml에 permissions가 없으면(또는
+    파일 자체가 없으면) 조용히 빈 리스트만 추가되고 log 기반 negatives만으로
+    기존과 동일하게 동작한다 — 이 테이블은 신뢰도 게이팅(§7 안전장치 ③, 별도
+    이슈)과는 다른 축이라 여기서 좁게 시작해 넓히는 로직은 다루지 않는다.
     """
     log_path = Path(log)
     if not log_path.exists():
@@ -547,7 +606,18 @@ def rule_from(
         validated_against = golden
     else:
         negatives = _cold_start_negatives(events, born_from)
-        validated_against = log
+        permission_table = rules.load_permission_table(config)
+        permission_negatives = rules.permission_table_negatives(born_from, permission_table)
+        negatives = negatives + permission_negatives
+        # §8 "validated_against는 음성 전용, born_from과 섞지 않는다" 원칙은 실제
+        # negatives 리스트(코드)에서는 지켜지지만(_cold_start_negatives가 evt !=
+        # born_from을 필터링), --golden 없이 log 자체를 그대로 validated_against에
+        # 적으면 born_from을 담은 그 파일을 "음성 코퍼스"라고 부르는 것처럼 보여
+        # provenance만 읽는 감사자에게 분리 원칙이 깨진 것처럼 비친다. cold-start
+        # 서브셋이고 born_from은 제외됐다는 점을 문자열 자체에 명시한다.
+        validated_against = f"{log} (cold-start subset, excludes born_from={event})"
+        if permission_negatives:
+            validated_against += f" + {config} permissions"
 
     candidate = rules.synthesize_rule(born_from, negatives)
 
@@ -593,7 +663,7 @@ def rule_from(
     rule_doc = {"rule": rule_body}
 
     if dry_run:
-        _print_dry_run(rule_doc, negatives)
+        _print_dry_run(rule_doc, negatives, candidate["candidate_trail"])
         return
 
     _append_rule_doc(Path(output), rule_doc)
