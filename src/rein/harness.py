@@ -56,6 +56,7 @@ class Harness:
         config: str = "rein.yaml",
         mode: Literal["record", "live-rerun"] = "record",
         replay_from: str | Path | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """
         Args:
@@ -69,6 +70,9 @@ class Harness:
                 live-rerun은 실제 도구 함수가 사용자 프로세스 안에만
                 있어 CLI가 대신 실행할 수 없다(§4) — 그래서 사용자가
                 자기 스크립트를 다시 실행하며 여기로 트리거한다.
+            context: 모든 도구 호출의 가드레일 검사와 이벤트 기록에 전달할
+                선택적 실행 컨텍스트. 예: {"agent_role": "content_editor"}.
+                지정하지 않으면 기존처럼 빈 context로 기록된다.
         """
         # §5와 동일한 fail-closed 패턴: 잘못된 조합은 생성 시점에 즉시 에러.
         if mode == "live-rerun" and replay_from is None:
@@ -83,6 +87,7 @@ class Harness:
         self.config = config
         self.mode = mode
         self.replay_from = Path(replay_from) if replay_from is not None else None
+        self._context = context  # register_tool 호출 시 검사·기록 경로로 전달
         self._observed_client: Any | None = None  # §3: 기본 비활성
         self._custom_stages: dict[str, StageFn] = {}
         # live-rerun: 실제 함수 호출 직전 위치 매칭(§6)에 쓸 엔진.
@@ -148,7 +153,7 @@ class Harness:
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            ctx = None  # 추후 Context() 객체 연동 시 수정
+            ctx = self._context  # 추후 Context() 객체 연동 시 이 대입 로직을 재검토함.
             bound = _bound_args(args, kwargs)
             tool_call = {"name": func.__name__, "args": bound}
 
