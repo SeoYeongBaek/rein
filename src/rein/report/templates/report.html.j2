@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+  <title>Rein Report</title>
+
+  <style>
+    :root {
+      --background: #f6f7fb;
+      --surface: #ffffff;
+      --border: #dfe3ea;
+      --text: #172033;
+      --muted: #687386;
+      --allow: #137a4a;
+      --deny: #c73535;
+      --shared: #eef4ff;
+      --intervention: #fff1d6;
+      --diverged: #f1f2f5;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--background);
+      font-family: Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 32px auto 64px;
+    }
+
+    header,
+    section,
+    .rule-card {
+      padding: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+
+    section {
+      margin-top: 24px;
+    }
+
+    .rule-card {
+      margin-top: 18px;
+    }
+
+    .muted,
+    small {
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns:
+        repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      padding: 14px;
+      background: #fafbfc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    .metric {
+      font-size: 1.7rem;
+      font-weight: 700;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      margin-top: 16px;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th,
+    td {
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+      border: 1px solid var(--border);
+    }
+
+    th {
+      background: #f0f2f5;
+      white-space: nowrap;
+    }
+
+    pre {
+      margin: 6px 0 0;
+      padding: 8px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #f5f6f8;
+      border-radius: 6px;
+    }
+
+    code {
+      padding: 2px 5px;
+      background: #f0f2f5;
+      border-radius: 5px;
+    }
+
+    .phase-shared {
+      background: var(--shared);
+    }
+
+    .phase-intervention {
+      background: var(--intervention);
+      font-weight: 600;
+    }
+
+    .phase-diverged {
+      color: var(--muted);
+      background: var(--diverged);
+    }
+
+    .selected {
+      outline: 2px solid #506cff;
+      outline-offset: -2px;
+    }
+
+    .regression {
+      background: #fff0f0;
+    }
+
+    .verdict-allow {
+      color: var(--allow);
+      font-weight: 700;
+    }
+
+    .verdict-deny {
+      color: var(--deny);
+      font-weight: 700;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #e8ebf0;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    .warning {
+      margin-top: 12px;
+      padding: 12px;
+      color: #765000;
+      background: #fff8e6;
+      border: 1px solid #edc36d;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+
+<body>
+<main>
+  <header>
+    <h1>Rein Report</h1>
+
+    <p class="muted">
+      실제 실행 로그와 규칙을 사용해 실패 → 규칙 → 재검증 결과를 표시함.
+    </p>
+
+    <div class="grid">
+      <div class="card">
+        <strong>Log</strong><br>
+        <code>{{ report.log_path }}</code>
+      </div>
+
+      <div class="card">
+        <strong>Rules</strong><br>
+        <code>{{ report.rules_path }}</code>
+      </div>
+
+      <div class="card">
+        <strong>First intervention</strong><br>
+
+        {% if report.intervention_seq is not none %}
+          <code>seq={{ report.intervention_seq }}</code>
+        {% else %}
+          판정 변경 없음
+        {% endif %}
+      </div>
+    </div>
+  </header>
+
+  <!-- 요소 ① 분기 타임라인 -->
+  <section id="timeline">
+    <h2>① 분기 타임라인</h2>
+
+    <p class="muted">
+      최초 판정 변경 전은 공통, 변경 지점은 개입,
+      이후는 미검증 구간으로 표시함.
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>구간</th>
+            <th>seq / evt</th>
+            <th>도구와 인자</th>
+            <th>Off</th>
+            <th>On</th>
+            <th>Outcome</th>
+          </tr>
+        </thead>
+
+        <tbody>
+        {% for row in report.timeline %}
+          <tr class="phase-{{ row.phase }}">
+            <td>
+              <span class="badge">
+                {% if row.phase == "shared" %}
+                  공통
+                {% elif row.phase == "intervention" %}
+                  개입
+                {% else %}
+                  미검증
+                {% endif %}
+              </span>
+            </td>
+
+            <td>
+              {% if row.seq is not none %}
+                <strong>{{ row.seq }}</strong><br>
+              {% endif %}
+
+              <code>{{ row.event_id }}</code>
+            </td>
+
+            <td>
+              <strong>{{ row.tool_name }}</strong>
+
+              {% if row.role %}
+                <br><small>role={{ row.role }}</small>
+              {% endif %}
+
+              <pre>{{ row.args | tojson(indent=2) }}</pre>
+            </td>
+
+            {% if row.kind == "model_client" %}
+              <td colspan="2" class="muted">
+                모델 제안 이벤트 · 판정 없음
+              </td>
+            {% else %}
+              <td class="verdict-{{ row.off_verdict }}">
+                {{ row.off_verdict }}
+              </td>
+
+              <td class="verdict-{{ row.on_verdict }}">
+                {{ row.on_verdict }}
+
+                {% if row.matched_rule_ids %}
+                  <br>
+                  <small>
+                    {{ row.matched_rule_ids | join(", ") }}
+                  </small>
+                {% endif %}
+              </td>
+            {% endif %}
+
+            <td>
+              {% if row.severity %}
+                <strong>{{ row.severity }}</strong>
+              {% endif %}
+
+              {% if row.detail %}
+                <br>{{ row.detail }}
+              {% endif %}
+
+              {% if not row.severity and not row.detail %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 요소 ② Before/After 지표 -->
+  <section id="metrics">
+    <h2>② Before / After 지표</h2>
+
+    <div class="grid">
+      <div class="card">
+        <strong>총 이벤트 수</strong>
+        <div class="metric">
+          {{ report.metrics.total_events }}
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>Off 시 Critical</strong>
+        <div class="metric">
+          {{ report.metrics.critical_off }}
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>On 시 차단</strong>
+        <div class="metric">
+          {{ report.metrics.blocked_on }}
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>판정 변경</strong>
+        <div class="metric">
+          {{ report.metrics.changed_count }}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 요소 ③ 후보 규칙 회귀 표 -->
+  <section id="candidate-regression">
+    <h2>③ 후보 규칙 회귀 표</h2>
+
+    {% for analysis in report.rule_analyses %}
+    <article class="rule-card">
+      <h3>
+        Rule <code>{{ analysis.rule_id }}</code>
+      </h3>
+
+      <p>
+        <strong>Rationale:</strong>
+        {{ analysis.rationale }}
+      </p>
+
+      <p>
+        <strong>born_from:</strong>
+        <code>{{ analysis.born_from }}</code><br>
+
+        <strong>validated_against:</strong>
+        <code>{{ analysis.validated_against }}</code><br>
+
+        <strong>generality_rank:</strong>
+        <code>{{ analysis.generality_rank }}</code>
+      </p>
+
+      {% if analysis.stale %}
+      <div class="warning">
+        저장된 규칙 정보와 현재 재계산 결과가 다름.
+        규칙 재검증이 필요함.
+      </div>
+      {% endif %}
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Depth</th>
+              <th>When</th>
+              <th>Scope</th>
+              <th>회귀 수</th>
+              <th>회귀 evt</th>
+            </tr>
+          </thead>
+
+          <tbody>
+          {% for candidate in analysis.candidate_rows %}
+            <tr class="{% if candidate.selected %}selected{% endif %}">
+              <td>
+                {{ candidate.depth }}/3
+
+                {% if candidate.selected %}
+                  <span class="badge">채택</span>
+                {% endif %}
+              </td>
+
+              <td>
+                <pre>{{ candidate.when | tojson(indent=2) }}</pre>
+              </td>
+
+              <td>
+                {% if candidate.scope %}
+                  <pre>{{ candidate.scope | tojson(indent=2) }}</pre>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+
+              <td>
+                {{ candidate.regression_ids | length }}
+              </td>
+
+              <td>
+                {% if candidate.regression_ids %}
+                  {{ candidate.regression_ids | join(", ") }}
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <details>
+        <summary>채택 규칙 원문 보기</summary>
+        <pre>{{ analysis.adopted_rule | tojson(indent=2) }}</pre>
+      </details>
+    </article>
+    {% endfor %}
+  </section>
+
+  <!-- 요소 ④ 채택 규칙 회귀 매트릭스 -->
+  <section id="regression-matrix">
+    <h2>④ 채택 규칙 회귀 매트릭스</h2>
+
+    {% for analysis in report.rule_analyses %}
+    <article class="rule-card">
+      <h3>
+        Rule <code>{{ analysis.rule_id }}</code>
+      </h3>
+
+      <p>
+        <strong>blocks:</strong>
+        <code>
+          {{ analysis.provenance_blocks | join(", ") or "[]" }}
+        </code>
+
+        <br>
+
+        <strong>regressions:</strong>
+        <code>
+          {{ analysis.provenance_regressions | join(", ") or "[]" }}
+        </code>
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Corpus</th>
+              <th>evt</th>
+              <th>행동</th>
+              <th>Tool</th>
+              <th>Role</th>
+              <th>판정</th>
+              <th>결과</th>
+            </tr>
+          </thead>
+
+          <tbody>
+          {% for row in analysis.matrix_rows %}
+            <tr class="{% if row.is_regression %}regression{% endif %}">
+              <td>{{ row.corpus_type }}</td>
+              <td><code>{{ row.event_id }}</code></td>
+              <td>{{ row.action }}</td>
+              <td>{{ row.tool_name }}</td>
+              <td>{{ row.role or "-" }}</td>
+
+              <td class="verdict-{{ row.applied_verdict }}">
+                {{ row.applied_verdict }}
+              </td>
+
+              <td>
+                <strong>{{ row.label }}</strong>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+</main>
+</body>
+</html>

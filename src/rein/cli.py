@@ -30,6 +30,7 @@ from rein.events.event_store import (
 )
 from rein.guardrails.verdict import Verdict
 from rein.replay.engine import ReplayEngine, ReplayMismatchError, _load_tool_wrap_events
+from rein.report import ReportError, build_report_data, render_report
 
 app = typer.Typer(name="rein", help="Agent = Model + Harness")
 console = Console()
@@ -674,15 +675,35 @@ def rule_from(
 def report(
     log: str,
     rules_path: Annotated[
-        str, typer.Option("--rules", help="필수 — 후보/채택 규칙 회귀 매트릭스 렌더용")
+        str,
+        typer.Option(
+            "--rules",
+            help="필수 — 후보/채택 규칙 회귀 매트릭스 렌더용",
+        ),
     ],
-    output: Annotated[str, typer.Option("-o", "--output")] = "report.html",
-):
-    """분기 타임라인/지표/후보 회귀 표/규칙 회귀 매트릭스를 담은 정적 HTML을 만든다."""
-    typer.echo(
-        f"report 옵션 파싱 완료: log={log}, rules={rules_path}, output={output} "
-        "(M1에서는 렌더링하지 않음)"
-    )
+    output: Annotated[
+        str,
+        typer.Option("-o", "--output"),
+    ] = "report.html",
+) -> None:
+    """실제 JSONL과 rules.yaml을 정적 HTML 리포트로 렌더링함."""
+    try:
+        report_data = build_report_data(
+            log_path=Path(log),
+            rules_path=Path(rules_path),
+        )
+        render_report(
+            data=report_data,
+            output_path=Path(output),
+        )
+    except ReportError as exc:
+        typer.echo(
+            f"리포트 생성 오류: {exc}",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+
+    typer.echo(f"리포트를 {output}에 생성했습니다.")
 
 
 if __name__ == "__main__":
