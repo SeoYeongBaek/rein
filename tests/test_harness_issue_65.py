@@ -129,8 +129,7 @@ def test_log_context_isolated_per_call(tmp_path: Path) -> None:
     # 세 호출 모두 로그 context는 사용자 입력 그대로 (§9 정적 메타데이터)
     for tw in tool_wraps:
         assert tw["context"] == {"agent_role": "content_editor"}, (
-            f"§9 위반: 호출 시점 외 mutation이 로그에 새어들었다. "
-            f"context={tw['context']!r}"
+            f"§9 위반: 호출 시점 외 mutation이 로그에 새어들었다. context={tw['context']!r}"
         )
         # session state 흔적 0건
         assert "counter" not in tw["context"]
@@ -212,9 +211,7 @@ def test_session_state_persists_across_calls(tmp_path: Path) -> None:
 
     # stage가 매 호출에서 본 ctx의 counter는 0, 1, 2 (누적됨)
     observed_counters = [ctx.get("counter", 0) for ctx in observed]
-    assert observed_counters == [0, 1, 2], (
-        f"§5 session state 누적이 깨졌다. observed={observed!r}"
-    )
+    assert observed_counters == [0, 1, 2], f"§5 session state 누적이 깨졌다. observed={observed!r}"
 
     # last_tool은 직전 호출까지 누적된 값
     assert observed[0].get("last_tool") is None
