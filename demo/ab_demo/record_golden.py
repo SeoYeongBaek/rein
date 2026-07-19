@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
 from rein.harness import Harness
 
@@ -17,59 +15,6 @@ SAFE_QUERIES = (
     "UPDATE posts SET body = 'Updated notice' WHERE id = 1;",
     "SELECT * FROM posts WHERE id = 1;",
 )
-
-
-def _normalize_zero_based_seq(path: Path) -> None:
-    """Harness가 기록한 1-based seq를 replay가 기대하는 0-based로 변환함."""
-    events: list[dict[str, Any]] = []
-
-    with path.open(encoding="utf-8") as file:
-        for line_number, raw_line in enumerate(file, start=1):
-            line = raw_line.strip()
-
-            if not line:
-                continue
-
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{path}:{line_number} JSONL 파싱 실패: {exc}") from exc
-
-            events.append(event)
-
-    integer_sequences = [event["seq"] for event in events if isinstance(event.get("seq"), int)]
-
-    if not integer_sequences:
-        return
-
-    first_seq = min(integer_sequences)
-
-    # 이미 0-based라면 다시 변경하지 않음.
-    if first_seq == 0:
-        return
-
-    if first_seq != 1:
-        raise ValueError(f"지원하지 않는 seq 시작값입니다: {first_seq}")
-
-    for event in events:
-        seq = event.get("seq")
-        parent_seq = event.get("parent_seq")
-
-        if isinstance(seq, int):
-            event["seq"] = seq - 1
-
-        if isinstance(parent_seq, int):
-            event["parent_seq"] = parent_seq - 1
-
-    with path.open("w", encoding="utf-8") as file:
-        for event in events:
-            file.write(
-                json.dumps(
-                    event,
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
 
 
 def record_golden_trace(
@@ -103,9 +48,6 @@ def record_golden_trace(
 
         for query in SAFE_QUERIES:
             execute_sql(query=query)
-
-    # 현재 replay 검증 기준에 맞게 seq를 0부터 시작하도록 정규화함.
-    _normalize_zero_based_seq(output_path)
 
     return output_path
 

@@ -168,9 +168,9 @@ class EventStore:
                 self._fh = self._path.open("a", encoding="utf-8")
             assert self._fh is not None
 
-            self._seq += 1  # [A] tool_wrap 매칭 키. 본 함수에서만 +1.
+            seq = self._seq  # 현재 값(처음엔 0)을 먼저 할당
+            self._seq += 1  # 할당 후 다음을 위해 1 증가
             self._evt_seq += 1  # [D] evt ID 발급.
-            seq = self._seq
             evt_id = self._make_evt_id(self._evt_seq)
 
             event = {
