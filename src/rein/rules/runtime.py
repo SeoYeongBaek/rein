@@ -10,17 +10,10 @@ from typing import Any
 import yaml
 
 from rein import rules
-
-# 기존 CLI의 충돌 해결 순서와 동일하게 유지함.
-_VERDICT_PRIORITY = {
-    "allow": 0,
-    "retry": 1,
-    "approve": 2,
-    "deny": 3,
-}
+from rein.guardrails.verdict import Verdict
 
 
-def load_rules(
+def _load_rules(
     rules_paths: Iterable[str | Path],
 ) -> list[dict[str, Any]]:
     """YAML 파일의 규칙 문서를 하나의 목록으로 읽음."""
@@ -63,19 +56,6 @@ def load_rules(
     return loaded_rules
 
 
-def normalize_verdict(value: Any) -> str:
-    """verdict를 소문자 문자열로 검증·정규화함."""
-    if not isinstance(value, str):
-        raise ValueError(f"verdict는 문자열이어야 합니다: {value!r}")
-
-    normalized = value.lower()
-
-    if normalized not in _VERDICT_PRIORITY:
-        raise ValueError(f"허용되지 않은 verdict: {value!r} (허용값: {sorted(_VERDICT_PRIORITY)})")
-
-    return normalized
-
-
 def matching_rules(
     event: dict[str, Any],
     loaded_rules: list[dict[str, Any]],
@@ -84,7 +64,7 @@ def matching_rules(
     return [rule for rule in loaded_rules if rules.rule_matches(rule, event)]
 
 
-def verdict_from_rules(
+def _verdict_from_rules(
     event: dict[str, Any],
     loaded_rules: list[dict[str, Any]],
 ) -> str:
@@ -97,9 +77,23 @@ def verdict_from_rules(
     if not matched:
         return "allow"
 
-    verdicts = [normalize_verdict(rule.get("then", "allow")) for rule in matched]
+    try:
+        verdicts = [_to_verdict(rule.get("then", "allow")) for rule in matched]
+    except ValueError as exc:
+        raise ValueError(f"규칙의 then 값이 잘못되었습니다: {matched!r}") from exc
 
-    return max(
-        verdicts,
-        key=_VERDICT_PRIORITY.__getitem__,
-    )
+    return str(max(verdicts, key=lambda v: v.value))
+
+
+def _to_verdict(value: str) -> Verdict:
+    """문자열 verdict를 Verdict로 변환함."""
+    if not isinstance(value, str):
+        raise ValueError(f"허용되지 않은 verdict 타입: {type(value).__name__}={value!r}")
+
+    try:
+        return Verdict(value)
+    except ValueError:
+        try:
+            return Verdict[value.upper()]
+        except (KeyError, AttributeError) as exc:
+            raise ValueError(f"허용되지 않은 verdict: {value!r}") from exc

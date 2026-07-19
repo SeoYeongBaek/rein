@@ -11,7 +11,6 @@ import hashlib
 import importlib.metadata
 import json
 import re
-import warnings
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -28,9 +27,12 @@ from rein.events.event_store import (
     SOURCE_OUTCOME,
     SOURCE_TOOL_WRAP,
 )
-from rein.guardrails.verdict import Verdict
 from rein.replay.engine import ReplayEngine, ReplayMismatchError, _load_tool_wrap_events
 from rein.report import ReportError, build_report_data, render_report
+from rein.rules.runtime import (
+    _load_rules,
+    _verdict_from_rules,
+)
 
 app = typer.Typer(name="rein", help="Agent = Model + Harness")
 console = Console()
@@ -144,90 +146,6 @@ def _check_outcome(evt: dict[str, Any], line_no: int, run_log: Path) -> None:
 #
 # §5 단일 정수 비교:
 #   DENY=4, APPROVE=3, RETRY=2, ALLOW=1 → max(.value)로 가장 제한적인 판정 선택.
-
-
-def _load_rules(rules_paths: list[str]) -> list[dict]:
-    """rules.yaml 여러 개를 평탄화. 파일 하나에 `---`로 구분된 여러 규칙 문서도 지원
-    (§4 rule-from의 append 동작을 받아내려면 한 파일에 규칙이 여러 개 쌓일 수 있음).
-    """
-    loaded = []
-    for path in rules_paths:
-        try:
-            text = Path(path).read_text(encoding="utf-8")
-        except OSError as e:
-            raise ValueError(f"{path} 파일을 읽을 수 없습니다: {e}") from e
-        try:
-            docs = list(yaml.safe_load_all(text))
-        except yaml.YAMLError as e:
-            raise ValueError(f"{path} YAML 파싱 실패: {e}") from e
-        for doc in docs:
-            if doc is None:
-                continue  # `---`가 만드는 빈 문서 — 정상 케이스, 조용히 스킵
-            if "rule" not in doc:
-                warnings.warn(
-                    f"{path}: 'rule' 키가 없는 YAML 문서를 건너뜁니다 "
-                    f"(최상위 키: {sorted(doc.keys())})",
-                    stacklevel=2,
-                )
-                continue
-            loaded.append(doc["rule"])
-    return loaded
-
-
-def _to_verdict(value: str) -> Verdict:
-    """문자열 → Verdict 변환 헬퍼. name과 value(정수) 둘 다 허용.
-
-    IntEnum은 기본적으로 value(정수) 매칭만 허용하지만, rein은 rules.yaml의
-    then: deny 같은 문자열을 받아야 하므로 name 매칭도 지원한다.
-    잘못된 값은 ValueError로 환원 — §5 fail-closed (조용한 allow 취급 금지).
-    """
-    # §5 fail-closed: then: null / then: 1 같은 비-str 입력은 str 검증 이전에
-    # 친절한 메시지로 거절한다. None이면 .upper() 호출에서 AttributeError가
-    # 새어나가 사용자 스택트레이스를 노출시키므로 (fail-closed 위반) 여기서 차단.
-    if not isinstance(value, str):
-        raise ValueError(
-            f"허용되지 않은 verdict 타입: {type(value).__name__}={value!r} "
-            f"(허용값: {[v.name.lower() for v in Verdict]})"
-        )
-    try:
-        return Verdict(value)  # value(정수) 매칭
-    except ValueError:
-        try:
-            return Verdict[value.upper()]  # name 매칭 (대소문자 무시)
-        except (KeyError, AttributeError) as e:
-            # AttributeError는 위 isinstance 가드가 정상 흐름에서 막지만,
-            # str이 아닌 객체의 .upper()가 우연히 정의돼 있는 경우 등
-            # 의외 경로를 위한 마지막 방어선.
-            raise ValueError(
-                f"허용되지 않은 verdict: {value!r} (허용값: {[v.name.lower() for v in Verdict]})"
-            ) from e
-
-
-def _verdict_from_rules(evt: dict, loaded_rules: list[dict]) -> str:
-    """규칙 적용 후 판정. 매칭된 규칙이 여럿이면 §5 충돌 해결 우선순위
-    (deny > approve > retry > allow)로 가장 제한적인 판정을 고른다.
-
-    loaded_rules는 미리 _load_rules로 로드된 규칙 리스트 — 이벤트마다 파일을
-    다시 읽지 않도록 호출자(_print_compare)가 루프 밖에서 한 번만 로드해서 넘긴다.
-
-    우선순위는 verdict.py의 IntEnum .value(SSOT)에서 직접 도출:
-    DENY=4 > APPROVE=3 > RETRY=2 > ALLOW=1. 별도 매핑 dict 없음.
-
-    TODO: §5 가드레일 4단계(schema/permission/budget/safety) 자체는 아직 없어서
-    여기선 rules.yaml 매칭만 수행 — 가드레일 엔진 연결 후 교체.
-    """
-    matched = [rule.get("then", "allow") for rule in loaded_rules if rules.rule_matches(rule, evt)]
-    if not matched:
-        return str(Verdict.ALLOW)  # = "allow"
-    try:
-        verdicts = [_to_verdict(v) for v in matched]
-    except ValueError as e:
-        raise ValueError(
-            f"규칙의 then 값이 잘못되었습니다: {matched!r} "
-            f"(허용값: {[v.name.lower() for v in Verdict]})"
-        ) from e
-    # §5: max(.value) — 가장 제한적인 판정. Verdict.DENY.value(=4)가 승리.
-    return str(max(verdicts, key=lambda v: v.value))
 
 
 @app.command()

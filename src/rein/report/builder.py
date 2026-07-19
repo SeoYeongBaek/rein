@@ -13,6 +13,7 @@ from rein.events.event_store import (
     SOURCE_OUTCOME,
     SOURCE_TOOL_WRAP,
 )
+from rein.guardrails.verdict import Verdict
 from rein.report.models import (
     CandidateRegressionRow,
     CorpusType,
@@ -25,10 +26,10 @@ from rein.report.models import (
     TimelineRow,
 )
 from rein.rules.runtime import (
-    load_rules,
+    _load_rules,
+    _to_verdict,
+    _verdict_from_rules,
     matching_rules,
-    normalize_verdict,
-    verdict_from_rules,
 )
 
 # rule-from이 cold-start 규칙의 provenance에 기록하는 문자열 형식임.
@@ -51,7 +52,7 @@ def build_report_data(
     events = _load_jsonl(log_path)
 
     try:
-        loaded_rules = load_rules([rules_path])
+        loaded_rules = _load_rules([rules_path])
     except ValueError as exc:
         raise ReportError(str(exc)) from exc
 
@@ -189,8 +190,8 @@ def _build_timeline(
 
     for event in tool_events:
         try:
-            off_verdict = normalize_verdict(event.get("verdict") or "allow")
-            on_verdict = verdict_from_rules(
+            off_verdict = str(_to_verdict(event.get("verdict") or "allow"))
+            on_verdict = _verdict_from_rules(
                 event,
                 loaded_rules,
             )
@@ -569,7 +570,7 @@ def _build_matrix_rows(
         )
 
         applied_verdict = (
-            normalize_verdict(adopted_rule.get("then", "deny")) if matched else "allow"
+            str(_to_verdict(adopted_rule.get("then", "deny"))) if matched else str(Verdict.ALLOW)
         )
 
         label: RegressionLabel
