@@ -129,11 +129,58 @@ def test_log_context_isolated_per_call(tmp_path: Path) -> None:
     # 세 호출 모두 로그 context는 사용자 입력 그대로 (§9 정적 메타데이터)
     for tw in tool_wraps:
         assert tw["context"] == {"agent_role": "content_editor"}, (
-            f"§9 위반: 호출 시점 외 mutation이 로그에 새어들었다. context={tw['context']!r}"
+            f"§9 위반: 호출 시점 외 mutation이 로그에 새어들었다. "
+            f"context={tw['context']!r}"
         )
         # session state 흔적 0건
         assert "counter" not in tw["context"]
         assert "last_tool" not in tw["context"]
+
+
+# === invariant 0: stage가 user context 메타데이터를 읽을 수 있다 (follow-up) ===
+
+
+def test_stage_can_read_user_context_metadata(tmp_path: Path) -> None:
+    """stage 함수가 user context 메타데이터(agent_role 등)를 ctx로 읽을 수 있다.
+
+    [이슈 #65 follow-up] §5/§9 분리 후에도 stage가 정적 메타데이터에
+    접근할 수 있어야 한다. 그렇지 않으면 M2 budget stage가 role별
+    예산을 적용할 수 없고, stage가 §5 "state는 시그니처에 드러난
+    의존성" 원칙을 우회해 self._context를 직접 참조하게 된다.
+
+    contract: self._session_state는 __init__에서 self._context의 얕은
+    복사본으로 seed되어, stage의 첫 호출 ctx는 사용자 입력 메타데이터를
+    그대로 포함한다.
+    """
+    record_path = tmp_path / "run.jsonl"
+    observed_first_call: list[dict[str, Any]] = []
+
+    def observe_stage(tool_call: dict[str, Any], ctx: Any) -> tuple[Verdict, str, str, str]:
+        observed_first_call.append(dict(ctx) if isinstance(ctx, dict) else {})
+        return Verdict.ALLOW, "", "", ""
+
+    with (
+        patch("rein.harness.load_stage_order", return_value=STAGE_ORDER),
+        patch("rein.harness.resolve_stage_order", return_value=STAGE_ORDER),
+    ):
+        h = Harness(
+            record=record_path,
+            context={
+                "agent_role": "content_editor",
+                "task": "공지사항 업데이트",
+            },
+        )
+        h.register_stage("counter_stage", observe_stage)
+
+        @h.register_tool
+        def execute_sql(query: str) -> dict[str, str]:
+            return {"status": "ok", "query": query}
+
+        execute_sql(query="SELECT 1;")
+
+    # stage의 ctx가 사용자 입력 메타데이터를 그대로 포함 (§5 contract)
+    assert observed_first_call[0].get("agent_role") == "content_editor"
+    assert observed_first_call[0].get("task") == "공지사항 업데이트"
 
 
 # === invariant 3: session state 누적 ===
@@ -165,7 +212,9 @@ def test_session_state_persists_across_calls(tmp_path: Path) -> None:
 
     # stage가 매 호출에서 본 ctx의 counter는 0, 1, 2 (누적됨)
     observed_counters = [ctx.get("counter", 0) for ctx in observed]
-    assert observed_counters == [0, 1, 2], f"§5 session state 누적이 깨졌다. observed={observed!r}"
+    assert observed_counters == [0, 1, 2], (
+        f"§5 session state 누적이 깨졌다. observed={observed!r}"
+    )
 
     # last_tool은 직전 호출까지 누적된 값
     assert observed[0].get("last_tool") is None

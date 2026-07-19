@@ -37,13 +37,19 @@ F = TypeVar("F", bound=Callable)
 
 
 class Context:
-    """도구 호출 컨텍스트 (이후 예산 누적, 에이전트 역할 등을 저장).
+    """도구 호출 컨텍스트. stage 함수가 받는 ctx의 정식 타입 자리.
 
     [이슈 #65] 본 클래스는 §5에서 약속한 Context 시그니처의 최소 스텁이다.
     실제 필드/메서드(예: budget 카운터, 토큰 누적)는 budget stage PR(§12
     M4 후보)의 책임이며, 그 PR에서 본 클래스를 채우거나 self._session_state
     를 본 클래스로 감싸는 결정이 이뤄진다. 현 PR은 본 클래스의 본체를
     열지 않고 signature만 유지한다.
+
+    stage가 실제로 받는 ctx 객체는 self._session_state dict다 — 본 PR
+    결정(이슈 #65 follow-up)에 따라 사용자 context의 얕은 복사본으로
+    seed되며, 그 위에 동적 누적(counter, token 등)이 얹힌다. 본 클래스는
+    그 dict의 향후 타입 자리 표시 역할만 한다(M4 budget stage PR이 본
+    클래스를 열 때 seed/dynamic 누적을 어떻게 노출할지 거기서 결정).
     """
 
     pass
@@ -126,13 +132,19 @@ class Harness:
         self.replay_from = Path(replay_from) if replay_from is not None else None
         # §9: 정적 호출 메타데이터로 로그에 기록되는 사용자 context.
         #     stage 함수가 이 dict 자체를 mutate해선 안 된다(§5/§9 분리).
+        #     log 경로(record_tool_wrap) 전용 — §9 정적 메타 약속 보존용.
         self._context = context
-        # [이슈 #65] §5: 세션 누적 상태. stage 함수가 토큰 사용량, 호출
-        # 횟수 등을 누적할 수 있는 Harness 내부 dict. 사용자 context와
-        # 별개 객체로 관리되어, stage의 mutation이 §9 로그 context 필드를
-        # 오염시키지 않는다. budget stage PR(§12 M4 후보)이 이 dict를
-        # 채울 예정 — 그 PR의 책임이며 본 PR은 초기화만 수행한다.
-        self._session_state: dict[str, Any] = {}
+        # [이슈 #65 follow-up] §5: stage가 받을 ctx. 사용자 context의
+        # 얕은 복사본으로 seed해 시작한다 — budget stage가 agent_role
+        # 같은 정적 메타데이터를 자연스럽게 읽을 수 있도록 (§5 "state는
+        # 시그니처에 드러난 의존성" 준수. stage가 stage_ctx 바깥의
+        # self._context를 직접 참조하는 §5 위반 경로를 원천 차단).
+        # 동적 누적(counter, token 등)은 그 위에 얹힌다. 사용자 원본
+        # context는 §9 정적 메타로 따로 보존되어, session state의
+        # mutation이 §9 로그 context 필드를 오염시키지 않는다. budget
+        # stage PR(§12 M4 후보)이 동적 누적을 채울 예정 — 본 PR은
+        # seed + §5/§9 분리만 담당.
+        self._session_state: dict[str, Any] = dict(self._context) if self._context else {}
         self._observed_client: Any | None = None  # §3: 기본 비활성
         self._custom_stages: dict[str, StageFn] = {}
         # live-rerun: 실제 함수 호출 직전 위치 매칭(§6)에 쓸 엔진.
@@ -199,10 +211,15 @@ class Harness:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             # [이슈 #65] §5/§9 분리. 두 객체는 서로 다른 dict다.
-            # · stage_ctx: §5 세션 누적 상태. stage 함수가 mutate 가능.
-            # · log_ctx: §9 정적 메타데이터. 호출 시점 얕은 복사본.
-            # 분리하지 않으면 stage의 mutation이 이번 호출의 tool_wrap
-            # 로그 줄에 그대로 새어 들어간다(이슈 #64 #65 배경).
+            # · stage_ctx: §5 세션 누적 상태. __init__에서 사용자
+            #   context의 얕은 복사로 seed됨. stage 함수가 agent_role
+            #   같은 정적 메타를 읽을 수 있고, 그 위에 counter·token
+            #   같은 동적 누적을 얹는다.
+            # · log_ctx: §9 정적 메타데이터. self._context의 호출 시점
+            #   얕은 복사본. stage_ctx의 mutation이 log로 새지 않도록
+            #   wrapper에서 미리 스냅샷.
+            # 분리하지 않으면 stage의 session mutation이 이번 호출의
+            # tool_wrap 로그 줄에 그대로 새어 들어간다 (이슈 #64 #65 배경).
             stage_ctx = self._session_state
             log_ctx = _snapshot_context_for_log(self._context)
 
