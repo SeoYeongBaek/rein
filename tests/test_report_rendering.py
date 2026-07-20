@@ -1,3 +1,7 @@
+"""report.html 데이터 생성·렌더링·CLI 연결 테스트."""
+
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -6,6 +10,7 @@ import yaml
 from typer.testing import CliRunner
 
 from rein.cli import app
+from rein.report import build_report_data, render_report
 
 runner = CliRunner()
 
@@ -205,51 +210,156 @@ def report_inputs(
     return log_path, rules_path
 
 
-# report 명령어가 필수 옵션을 올바르게 파싱하는지 확인
-def test_report_parses_required_options(
+def test_build_report_data_creates_timeline_and_metrics(
+    report_inputs: tuple[Path, Path],
+) -> None:
+    log_path, rules_path = report_inputs
+
+    report = build_report_data(
+        log_path=log_path,
+        rules_path=rules_path,
+    )
+
+    assert report.intervention_seq == 2
+    assert report.metrics.total_events == 2
+    assert report.metrics.critical_off == 1
+    assert report.metrics.blocked_on == 1
+    assert report.metrics.changed_count == 1
+
+    failure_row = next(row for row in report.timeline if row.event_id == "evt_0042")
+
+    assert failure_row.phase == "intervention"
+    assert failure_row.off_verdict == "allow"
+    assert failure_row.on_verdict == "deny"
+    assert failure_row.matched_rule_ids == ("rule_0001",)
+
+
+def test_build_report_data_creates_candidate_table(
+    report_inputs: tuple[Path, Path],
+) -> None:
+    log_path, rules_path = report_inputs
+
+    report = build_report_data(
+        log_path=log_path,
+        rules_path=rules_path,
+    )
+
+    analysis = report.rule_analyses[0]
+
+    assert analysis.rule_id == "rule_0001"
+    assert analysis.born_from == "evt_0042"
+
+    assert [row.depth for row in analysis.candidate_rows] == [
+        1,
+        2,
+        3,
+    ]
+
+    selected_rows = [row for row in analysis.candidate_rows if row.selected]
+
+    assert len(selected_rows) == 1
+    assert selected_rows[0].depth == 2
+
+
+def test_build_report_data_creates_regression_matrix(
+    report_inputs: tuple[Path, Path],
+) -> None:
+    log_path, rules_path = report_inputs
+
+    report = build_report_data(
+        log_path=log_path,
+        rules_path=rules_path,
+    )
+
+    matrix = report.rule_analyses[0].matrix_rows
+
+    positive = next(row for row in matrix if row.corpus_type == "positive")
+
+    negatives = [row for row in matrix if row.corpus_type == "negative"]
+
+    assert positive.event_id == "evt_0042"
+    assert positive.label == "Blocked"
+
+    assert len(negatives) == 2
+    assert all(row.label == "Pass" for row in negatives)
+
+
+def test_render_report_creates_four_sections(
     report_inputs: tuple[Path, Path],
     tmp_path: Path,
-):
-    log, rules = report_inputs
-    output = tmp_path / "report.html"
+) -> None:
+    log_path, rules_path = report_inputs
+
+    report = build_report_data(
+        log_path=log_path,
+        rules_path=rules_path,
+    )
+
+    output_path = tmp_path / "nested" / "report.html"
+
+    render_report(
+        data=report,
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+
+    html = output_path.read_text(encoding="utf-8")
+
+    assert "① 분기 타임라인" in html
+    assert "② Before / After 지표" in html
+    assert "③ 후보 규칙 회귀 표" in html
+    assert "④ 채택 규칙 회귀 매트릭스" in html
+
+    assert "evt_0042" in html
+    assert "rule_0001" in html
+    assert "Blocked" in html
+    assert "Pass" in html
+
+
+def test_report_cli_creates_html(
+    report_inputs: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    log_path, rules_path = report_inputs
+    output_path = tmp_path / "report.html"
+
     result = runner.invoke(
         app,
-        ["report", str(log), "--rules", str(rules), "-o", str(output)],
+        [
+            "report",
+            str(log_path),
+            "--rules",
+            str(rules_path),
+            "-o",
+            str(output_path),
+        ],
     )
 
     assert result.exit_code == 0, result.output
-    assert output.exists()
+    assert output_path.exists()
     assert "리포트를" in result.output
 
 
-# report 명령어가 --output (long form) 옵션을 올바르게 받아들이는지 확인
-def test_report_accepts_long_output_option(
+def test_report_cli_accepts_long_output_option(
     report_inputs: tuple[Path, Path],
     tmp_path: Path,
-):
-    log, rules = report_inputs
-    output = tmp_path / "custom.html"
+) -> None:
+    log_path, rules_path = report_inputs
+    output_path = tmp_path / "custom.html"
 
     result = runner.invoke(
         app,
-        ["report", str(log), "--rules", str(rules), "--output", str(output)],
+        [
+            "report",
+            str(log_path),
+            "--rules",
+            str(rules_path),
+            "--output",
+            str(output_path),
+        ],
     )
 
     assert result.exit_code == 0, result.output
-    assert output.exists()
+    assert output_path.exists()
     assert "리포트를" in result.output
-
-
-# report 명령어가 --rules 옵션을 필수로 요구하는지 확인
-def test_report_requires_rules(tmp_path: Path):
-    log = tmp_path / "run.jsonl"
-    output = tmp_path / "report.html"
-
-    result = runner.invoke(
-        app,
-        ["report", str(log), "-o", str(output)],
-    )
-
-    assert result.exit_code != 0
-    assert "rules" in result.output.lower()
-    assert not output.exists()

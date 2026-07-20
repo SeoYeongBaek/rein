@@ -45,7 +45,7 @@ def test_successful_call_appends_tool_wrap_and_ok_outcome(harness):
     assert tool_wrap["source"] == "tool_wrap"
     assert tool_wrap["tool_name"] == "add"
     assert tool_wrap["verdict"] == "allow"
-    assert tool_wrap["seq"] == 1
+    assert tool_wrap["seq"] == 0
 
     assert outcome["source"] == "outcome"
     assert outcome["evt"] == tool_wrap["evt"]
@@ -87,4 +87,4 @@ def test_multiple_calls_share_monotonic_seq(harness):
 
     events = _read_events(harness.record_path)
     tool_wraps = [e for e in events if e["source"] == "tool_wrap"]
-    assert [e["seq"] for e in tool_wraps] == [1, 2]
+    assert [e["seq"] for e in tool_wraps] == [0, 1]

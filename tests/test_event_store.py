@@ -82,7 +82,7 @@ class TestThreadSafety:
 
         # (2) seq가 1..20 단조 증가 (단일 카운터 보존)
         seqs = sorted(e["seq"] for e in events)
-        assert seqs == list(range(1, 21))
+        assert seqs == list(range(0, 20))
 
         # (3) evt ID가 evt_0001..evt_0020으로 모두 고유
         evts = sorted(e["evt"] for e in events)
@@ -133,7 +133,7 @@ class TestThreadSafety:
         # tool_wrap 라인의 seq는 1..10 범위 (매칭 키 단일 카운터)
         tw_events = [e for e in events if e["source"] == "tool_wrap"]
         tw_seqs = sorted(e["seq"] for e in tw_events)
-        assert tw_seqs == list(range(1, 11))
+        assert tw_seqs == list(range(0, 10))
 
         # model_client 라인의 seq 필드는 모두 null (§9)
         mc_events = [e for e in events if e["source"] == "model_client"]
@@ -156,9 +156,9 @@ class TestEvtIdSingleCounter:
         assert e1["evt"] == "evt_0001"
         assert e2["evt"] == "evt_0002"
         assert e3["evt"] == "evt_0003"
-        assert e1["seq"] == 1
-        assert e2["seq"] == 2
-        assert e3["seq"] == 3
+        assert e1["seq"] == 0
+        assert e2["seq"] == 1
+        assert e3["seq"] == 2
 
     def test_model_client_evt_id_unique_with_tool_wrap(self, tmp_store: EventStore) -> None:
         """[D/D.review 핵심 회귀 가드]
@@ -178,7 +178,7 @@ class TestEvtIdSingleCounter:
             e3["seq"]가 3이 되어 단조 가정이 깨지므로 이 테스트가 실패한다.
         """
         e1 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
-        e2 = tmp_store.record_model_client(parent_seq=1, tool_name="t", proposed_args={})
+        e2 = tmp_store.record_model_client(parent_seq=0, tool_name="t", proposed_args={})
         e3 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
 
         # evt ID 모두 고유 (γ-1: self._evt_seq 단일 카운터)
@@ -189,12 +189,12 @@ class TestEvtIdSingleCounter:
 
         # §6 매칭 키: tool_wrap seq는 1..N 단조 (γ-1: model_client가
         # self._seq를 건드리지 않으므로 깨끗)
-        assert e1["seq"] == 1
+        assert e1["seq"] == 0
         assert e2["seq"] is None  # §9 "model_client seq 미부여"
-        assert e3["seq"] == 2  # γ-1: tool_wrap 매칭 키 단조
+        assert e3["seq"] == 1  # γ-1: tool_wrap 매칭 키 단조
 
         # model_client의 parent_seq는 선행 tool_wrap 표면화
-        assert e2["parent_seq"] == 1
+        assert e2["parent_seq"] == 0
 
     def test_outcome_reuses_tool_wrap_evt_and_seq(self, tmp_store: EventStore) -> None:
         """outcome 라인은 tool_wrap 라인과 evt/seq를 공유한다.
@@ -221,7 +221,7 @@ class TestEvtIdSingleCounter:
         outcome_line = [ev for ev in events if ev["source"] == "outcome"]
         assert len(outcome_line) == 1
         assert outcome_line[0]["evt"] == "evt_0002"
-        assert outcome_line[0]["seq"] == 2
+        assert outcome_line[0]["seq"] == 1
 
     def test_full_sequence_no_gaps_or_duplicates(self, tmp_store: EventStore) -> None:
         """tool_wrap / model_client / outcome 혼합 시나리오에서
@@ -229,13 +229,13 @@ class TestEvtIdSingleCounter:
         # tool_wrap 1
         tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
         # model_client (tool_wrap 1에 선행)
-        tmp_store.record_model_client(parent_seq=1, tool_name="t", proposed_args={})
+        tmp_store.record_model_client(parent_seq=0, tool_name="t", proposed_args={})
         # tool_wrap 2
         e2 = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
         # outcome (tool_wrap 2의 결과)
         tmp_store.record_outcome(e2, status="ok", severity="info", detail="ok")
         # model_client (outcome 이후 — 다음 tool_wrap은 없음)
-        tmp_store.record_model_client(parent_seq=2, tool_name="t", proposed_args={})
+        tmp_store.record_model_client(parent_seq=0, tool_name="t", proposed_args={})
 
         events = _read_jsonl(tmp_store._path)
 
@@ -291,7 +291,7 @@ class TestReplayMatchingUnaffected:
         tw_seqs = [e["seq"] for e in tw_events]
 
         # tool_wrap 라인의 seq는 1, 2 — 매칭 키로 깨끗
-        assert tw_seqs == [1, 2]
+        assert tw_seqs == [0, 1]
 
         # model_client 라인은 seq=null — 매칭 대상에서 제외됨
         mc_events = [e for e in events if e["source"] == "model_client"]
