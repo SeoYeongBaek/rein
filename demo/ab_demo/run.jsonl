@@ -1,0 +1,4 @@
+{"schema_version": "v1", "evt": "evt_0001", "seq": 0, "source": "tool_wrap", "parent_seq": null, "tool_name": "execute_sql", "args": {"query": "SELECT * FROM posts WHERE id = 1;"}, "context": {"agent_role": "content_editor"}, "verdict": "allow"}
+{"schema_version": "v1", "evt": "evt_0001", "seq": 0, "source": "outcome", "parent_seq": 0, "tool_name": "execute_sql", "outcome": {"status": "ok", "side_effect": null, "severity": "info", "detail": null}}
+{"schema_version": "v1", "evt": "evt_0002", "seq": 1, "source": "tool_wrap", "parent_seq": null, "tool_name": "execute_sql", "args": {"query": "DROP TABLE users;"}, "context": {"agent_role": "content_editor"}, "verdict": "allow"}
+{"schema_version": "v1", "evt": "evt_0002", "seq": 1, "source": "outcome", "parent_seq": 1, "tool_name": "execute_sql", "outcome": {"status": "ok", "side_effect": null, "severity": "info", "detail": null}}
