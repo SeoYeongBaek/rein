@@ -301,10 +301,22 @@ class Harness:
 
         # ① 검사: 첫 non-allow 승리(§5). stage_ctx가 stage에 직접 전달.
         for _stage_name, stage_fn in pipeline:
-            verdict, rule_id, rationale, evt_id = stage_fn(tool_call, stage_ctx)
+            verdict, rule_id, rationale, _stage_evt_id = stage_fn(tool_call, stage_ctx)
             if verdict != Verdict.ALLOW:
+                # [버그 픽스 B] non-allow도 §9 그대로 tool_wrap 한 줄로
+                # 남긴다. 실행이 없었으므로 outcome 줄은 만들지 않는다
+                # (§9 생애주기 비대칭 — outcome이 없을 수 있다는 것과
+                # 일관됨). evt_id는 스테이지가 반환한 placeholder 대신
+                # 방금 기록된 진짜 evt를 쓴다 — 스테이지는 실제 evt id를
+                # 미리 알 수 없다(부여는 EventStore의 책임).
+                event = self._event_store.record_tool_wrap(
+                    tool_name=tool_call["name"],
+                    args=tool_call.get("args", {}),
+                    context=log_ctx,
+                    verdict=str(verdict),
+                )
                 # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
-                _enforce(verdict, rule_id, rationale, evt_id=evt_id)
+                _enforce(verdict, rule_id, rationale, evt_id=event["evt"])
                 return  # type: ignore[unreachable]
 
         # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
