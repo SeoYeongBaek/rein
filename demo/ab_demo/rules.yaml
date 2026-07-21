@@ -1,0 +1,21 @@
+rule:
+  id: rule_0001
+  origin: auto
+  when:
+    tool: execute_sql
+    features:
+      class:
+        in:
+        - DDL_DESTRUCTIVE
+  then: deny
+  rationale: 'OWASP LLM06 Excessive Agency: execute_sql의 DDL_DESTRUCTIVE 호출은 차단 대상'
+  provenance:
+    born_from: evt_0002
+    validated_against: demo/ab_demo/golden_run.jsonl
+    blocks:
+    - evt_0002
+    regressions: []
+    generality_rank: 2/3
+    extractor: sqlglot==30.12.0
+    tool_sig: execute_sql:793059
+    feature_schema: v1

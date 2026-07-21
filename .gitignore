@@ -29,7 +29,9 @@ coverage.xml
 # rein 산출물 (로컬 실행 결과물 — 커밋 불필요)
 *.jsonl
 !demo/ab_demo/golden_run.jsonl
+!demo/ab_demo/run.jsonl
 *.html
+!demo/ab_demo/report.html
 rein.yaml
 
 # IDE
