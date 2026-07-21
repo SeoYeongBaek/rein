@@ -38,3 +38,6 @@ rein.yaml
 .vscode/
 .idea/
 *.DS_Store
+
+# git worktrees (로컬 임시 작업 공간)
+.worktrees/
