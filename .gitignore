@@ -32,9 +32,13 @@ coverage.xml
 !demo/ab_demo/run.jsonl
 *.html
 !demo/ab_demo/report.html
+examples/generated_rules.yaml
 rein.yaml
 
 # IDE
 .vscode/
 .idea/
 *.DS_Store
+
+# git worktrees (로컬 임시 작업 공간)
+.worktrees/

@@ -1,0 +1,11 @@
+rule:
+  id: rule_0007
+  origin: auto
+  when:
+    tool: execute_sql
+    features:
+      class: { in: [DDL_DESTRUCTIVE] }
+  scope:
+    agent.role: content_editor
+  then: deny
+  rationale: "OWASP LLM06 Excessive Agency — content_editor는 파괴적 DDL 권한 없음"

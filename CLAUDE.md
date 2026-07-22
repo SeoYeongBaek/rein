@@ -118,9 +118,12 @@ h = Harness(record="run.jsonl")
 def delete_file(path: str):
     os.remove(path)
 
-# 방안 B — 컨텍스트 매니저로 루프 전체 감싸기
-with Harness(record="run.jsonl") as h:
-    agent.run(task="안 쓰는 파일 정리해줘")  # 기존 코드 무수정
+# 방안 B — 컨텍스트 매니저로 하네스 수명주기 감싸기
+# 도구는 위에서 이미 register_tool로 등록되어 있어야 한다 — with 블록이
+# agent.run() 내부 호출을 자동으로 가로채지는 않는다. with는 스테이지
+# 확정(seal)과 이벤트 저장소 close만 관리하는 수명주기 문법이다.
+with h:
+    agent.run(task="안 쓰는 파일 정리해줘")
 ```
 
 이 시그니처("5줄 통합")는 M1 시점에 확정하고, M2~M4에서 바꾸지 않는다.
@@ -167,14 +170,15 @@ replay_from="run.jsonl")`로 직접 트리거해야 한다. 기본값이
 
 `context`는 예: `{"agent_role": "content_editor", "task": "공지사항
 업데이트"}`처럼 §9 로그의 `context` 필드(정적 호출 메타데이터)를 채우는
-데 쓴다. 미지정 시 빈 context로 기록된다. **알려진 미해결 항목(이슈
-#64)**: 현재 구현은 `register_tool` wrapper에서 `Harness` 생성 시
-받은 dict를 매 호출마다 그대로(별도 복사 없이) stage 함수와
-`record_tool_wrap` 양쪽에 넘긴다. §5 stage 함수가 이 객체에 세션
-누적 상태(예산 카운터 등)를 mutate하면 그 값이 §9가 "정적 메타데이터"로
-약속한 로그 필드에 새어 들어갈 수 있다 — §5 세션 상태와 §9 로그
-메타데이터를 분리(예: 별도 내부 dict로 세션 누적을 관리하고 로그엔
-호출 시점 얕은 복사만 전달)하는 코드 변경이 후속 PR로 필요하다.
+데 쓴다. 미지정 시 빈 context로 기록된다. `register_tool` wrapper는
+§5 세션 누적 상태와 §9 로그 메타데이터를 별개 객체로 분리해 다룬다(이슈
+#64/#65 해결, `harness.py`): `__init__`에서 사용자 `context`의 얕은
+복사로 `self._session_state` dict를 seed하고(`harness.py:161`) stage
+함수는 이 dict만 받아 mutate한다. 로그 쪽은 매 호출마다 `self._context`를
+`_snapshot_context_for_log`로 다시 얕은 복사해(`harness.py:75`,
+`harness.py:238`) `record_tool_wrap`에 넘기므로, stage의 세션 상태
+mutation이 §9가 "정적 메타데이터"로 약속한 로그 필드에 새어 들어가지
+않는다.
 
 ### register_tool 판정 계약
 
