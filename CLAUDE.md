@@ -118,9 +118,12 @@ h = Harness(record="run.jsonl")
 def delete_file(path: str):
     os.remove(path)
 
-# 방안 B — 컨텍스트 매니저로 루프 전체 감싸기
-with Harness(record="run.jsonl") as h:
-    agent.run(task="안 쓰는 파일 정리해줘")  # 기존 코드 무수정
+# 방안 B — 컨텍스트 매니저로 하네스 수명주기 감싸기
+# 도구는 위에서 이미 register_tool로 등록되어 있어야 한다 — with 블록이
+# agent.run() 내부 호출을 자동으로 가로채지는 않는다. with는 스테이지
+# 확정(seal)과 이벤트 저장소 close만 관리하는 수명주기 문법이다.
+with h:
+    agent.run(task="안 쓰는 파일 정리해줘")
 ```
 
 이 시그니처("5줄 통합")는 M1 시점에 확정하고, M2~M4에서 바꾸지 않는다.
