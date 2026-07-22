@@ -32,6 +32,7 @@ from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
 from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
 from rein.guardrails.verdict import Verdict
 from rein.replay import ReplayEngine
+from rein.rules.runtime import _load_rules, _to_verdict, _verdict_from_rules, matching_rules
 
 F = TypeVar("F", bound=Callable)
 
@@ -91,6 +92,15 @@ def _snapshot_context_for_log(ctx: Any) -> dict[str, Any]:
     return dict(getattr(ctx, "__dict__", {}) or {})
 
 
+def _normalize_rules_paths(rules: str | list[str] | None) -> list[str]:
+    """§4 Harness(rules=...)의 str | list[str] | None을 경로 리스트로 통일."""
+    if rules is None:
+        return []
+    if isinstance(rules, str):
+        return [rules]
+    return list(rules)
+
+
 class Harness:
     def __init__(
         self,
@@ -127,6 +137,10 @@ class Harness:
         # §6/§9: 모든 tool_wrap + outcome 이벤트는 이 저장소를 통해서만 append된다.
         self._event_store = EventStore(self.record_path)
         self.rules = rules
+        # [버그 픽스 A] 생성 시점에 즉시 로드 — §5 fail-closed와 같은 타이밍.
+        # YAML이 없거나 파싱 실패하면 Harness() 생성 시점에 바로 에러난다
+        # (첫 도구 호출까지 에러를 미루지 않음).
+        self._loaded_rules: list[dict[str, Any]] = _load_rules(_normalize_rules_paths(rules))
         self.config = config
         self.mode = mode
         self.replay_from = Path(replay_from) if replay_from is not None else None
@@ -287,10 +301,22 @@ class Harness:
 
         # ① 검사: 첫 non-allow 승리(§5). stage_ctx가 stage에 직접 전달.
         for _stage_name, stage_fn in pipeline:
-            verdict, rule_id, rationale, evt_id = stage_fn(tool_call, stage_ctx)
+            verdict, rule_id, rationale, _stage_evt_id = stage_fn(tool_call, stage_ctx)
             if verdict != Verdict.ALLOW:
+                # [버그 픽스 B] non-allow도 §9 그대로 tool_wrap 한 줄로
+                # 남긴다. 실행이 없었으므로 outcome 줄은 만들지 않는다
+                # (§9 생애주기 비대칭 — outcome이 없을 수 있다는 것과
+                # 일관됨). evt_id는 스테이지가 반환한 placeholder 대신
+                # 방금 기록된 진짜 evt를 쓴다 — 스테이지는 실제 evt id를
+                # 미리 알 수 없다(부여는 EventStore의 책임).
+                event = self._event_store.record_tool_wrap(
+                    tool_name=tool_call["name"],
+                    args=tool_call.get("args", {}),
+                    context=log_ctx,
+                    verdict=str(verdict),
+                )
                 # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
-                _enforce(verdict, rule_id, rationale, evt_id=evt_id)
+                _enforce(verdict, rule_id, rationale, evt_id=event["evt"])
                 return  # type: ignore[unreachable]
 
         # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
@@ -381,7 +407,30 @@ class Harness:
     def _default_safety_check(
         self, tool_call: dict[str, Any], ctx: Any
     ) -> tuple[Verdict, str, str, str]:
-        return Verdict.ALLOW, "", "", ""
+        """§5 safety 스테이지 — self._loaded_rules(rules.yaml)를 실제로
+        집행한다(버그 픽스 A). 판정 로직은 새로 만들지 않고
+        rein.rules.runtime의 기존 매처를 그대로 재사용한다.
+        """
+        if not self._loaded_rules:
+            return Verdict.ALLOW, "", "", ""
+
+        evt = {
+            "tool_name": tool_call["name"],
+            "args": tool_call.get("args") or {},
+            "context": ctx or {},
+        }
+        matched = matching_rules(evt, self._loaded_rules)
+        if not matched:
+            return Verdict.ALLOW, "", "", ""
+
+        verdict = _to_verdict(_verdict_from_rules(evt, self._loaded_rules))
+        if verdict == Verdict.ALLOW:
+            return Verdict.ALLOW, "", "", ""
+
+        winning_rule = next(
+            rule for rule in matched if _to_verdict(rule.get("then", "allow")) == verdict
+        )
+        return verdict, winning_rule.get("id", ""), winning_rule.get("rationale", ""), ""
 
     def __enter__(self) -> Harness:
         # 방안 B(§4): with Harness(...) as h: agent.run(...) 로 에이전트

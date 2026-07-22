@@ -32,6 +32,7 @@ coverage.xml
 !demo/ab_demo/run.jsonl
 *.html
 !demo/ab_demo/report.html
+examples/generated_rules.yaml
 rein.yaml
 
 # IDE

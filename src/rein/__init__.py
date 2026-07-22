@@ -11,8 +11,8 @@
     def delete_file(path: str):
         ...
 
-    with Harness(record="run.jsonl") as h:
-        agent.run(task="...")
+    with h:
+        agent.run(task="...")  # 도구는 위에서 이미 register_tool로 등록됨
 """
 
 from rein.guardrails.exceptions import (
