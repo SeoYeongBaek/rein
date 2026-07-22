@@ -128,9 +128,9 @@ def test_log_context_isolated_per_call(tmp_path: Path) -> None:
 
     # 세 호출 모두 로그 context는 사용자 입력 그대로 (§9 정적 메타데이터)
     for tw in tool_wraps:
-        assert tw["context"] == {
-            "agent_role": "content_editor"
-        }, f"§9 위반: 호출 시점 외 mutation이 로그에 새어들었다. context={tw['context']!r}"
+        assert tw["context"] == {"agent_role": "content_editor"}, (
+            f"§9 위반: 호출 시점 외 mutation이 로그에 새어들었다. context={tw['context']!r}"
+        )
         # session state 흔적 0건
         assert "counter" not in tw["context"]
         assert "last_tool" not in tw["context"]
