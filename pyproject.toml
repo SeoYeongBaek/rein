@@ -56,7 +56,13 @@ demo = ["openai>=1.0"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff>=0.6",
+    # .pre-commit-config.yaml의 ruff-pre-commit rev와 정확히 같은 버전으로
+    # 고정한다. 이전엔 ruff>=0.6(무제한)이라 CI(pip install)가 pre-commit이
+    # 검증한 버전보다 새 ruff를 받아, 새 버전이 포맷 기본 동작을 바꿀 때마다
+    # (예: 0.16.0부터 마크다운 내 파이썬 코드블록도 포맷 대상에 포함) CI만
+    # 실패하는 드리프트가 반복됐다(이슈 #69 대응 커밋 223d0b4가 pre-commit만
+    # 고쳤던 것의 재발). 버전을 하나로 고정해 이 드리프트 자체를 없앤다.
+    "ruff==0.15.22",
     "pre-commit>=3.0",
     # 이슈 #15: register_tool을 외부 프레임워크(LangChain)에 붙여도
     # 충돌 없이 동작하는지 검증하기 위한 최소 통합 의존성.
