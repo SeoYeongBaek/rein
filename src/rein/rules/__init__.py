@@ -1,13 +1,22 @@
 """규칙 생성 엔진 (CLAUDE.md §7). featurize -> synthesize & verify (계층적 빔서치 K=8, depth=3)
 -> (로드맵) LLM post-mortem.
 
-전제 조건(§7 featurize 의존): 이 모듈이 계산하는 severity/class는 SQL
-featurizer(sqlglot 파싱) 결과에서만 나온다. rules.synthesize_rule과
-rule_matches는 evt["args"]를 이 모듈의 featurize()로 다시 계산해서 쓰지,
-로그에 이미 박혀 있는 evt["outcome"]["severity"] 문자열을 신뢰하지
-않는다. 로그의 severity가 featurizer가 아닌 다른 경로(수기 태깅, 다른
-버전의 분류 테이블 등)로 채워졌다면 값이 어긋날 수 있기 때문이다(§8
-stale 검증 게이트와 동일한 우려).
+전제 조건(§7 featurize 의존): 이 모듈이 계산하는 severity/class는
+featurizer 결과에서만 나온다. rules.synthesize_rule과 rule_matches는
+evt["args"]를 이 모듈의 featurize()(SQL, §10 필수)로 다시 계산해서
+쓰지, 로그에 이미 박혀 있는 evt["outcome"]["severity"] 문자열을
+신뢰하지 않는다. 로그의 severity가 featurizer가 아닌 다른 경로(수기
+태깅, 다른 버전의 분류 테이블 등)로 채워졌다면 값이 어긋날 수 있기
+때문이다(§8 stale 검증 게이트와 동일한 우려).
+
+`rule_matches`는 SQL(`featurize`) 우선, 실패 시 path(`featurize_path`,
+§7 스트레치, 이슈 #76) 순으로 재계산한다 — 이 폴백 한 곳이
+`_default_safety_check`(라이브 가드레일)와 `rein replay --compare`
+둘 다에서 공유되므로 path 인식이 두 경로 모두에 적용된다. 단,
+`synthesize_rule`/`permission_table_negatives`/`cli.py`의 콜드 스타트
+필터/`report/builder.py`의 severity 계산은 여전히 SQL(`featurize`)만
+호출한다 — path 이벤트에 대한 **자동 규칙 합성**과 **리포트 severity
+반영**은 M3 스코프 밖(M4 후속)이다.
 
 이슈 #10 guard 구현됨: `rein rule-from`의 콜드 스타트 합성 음성 필터
 (이슈 #11)도 같은 이유로 로그의 outcome.severity 필드를 직접 읽지 않는다
@@ -20,7 +29,8 @@ featurize가 실패하는(비-SQL) 이벤트는 검증 불가로 간주해 음�
 
 from __future__ import annotations
 
-from pathlib import Path
+import fnmatch
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import sqlglot
@@ -30,14 +40,17 @@ from sqlglot import exp
 # §9 schema_version과 대칭 — 특징 명칭이 바뀌면 이 버전을 올린다.
 FEATURE_SCHEMA_VERSION = "v1"
 
-# §7 severity 분류 테이블 중 SQL class -> severity 매핑만 다룬다(path/tool 축은
-# featurizer 스코프 밖, §10). 지금 당장 이 상수를 쓰는 곳은 없다 — 로그 기록
-# 시점(§3 인터셉터, 현준 담당)의 severity 태깅이 나중에 같은 테이블을
-# 재사용하도록 미리 공개해서 두 곳의 분류 기준이 드리프트하지 않게 한다.
+# §7 severity 분류 테이블. SQL(featurize)과 path(featurize_path, §10 스트레치,
+# 이슈 #76) 두 featurizer의 class를 모두 담는다(tool 축은 여전히 스코프 밖).
+# 지금 당장 이 상수를 쓰는 곳은 없다 — 로그 기록 시점(§3 인터셉터, 현준 담당)의
+# severity 태깅이 나중에 같은 테이블을 재사용하도록 미리 공개해서 두 곳의
+# 분류 기준이 드리프트하지 않게 한다.
 SEVERITY_TABLE: dict[str, str] = {
     "DDL_DESTRUCTIVE": "critical",
     "DML_DESTRUCTIVE": "critical",
     "SQL_SAFE": "info",
+    "PATH_DESTRUCTIVE": "critical",  # §7 "파일 삭제/덮어쓰기"
+    "PATH_SAFE": "info",  # §7 "파일 읽기/조회"
 }
 
 # class -> rationale에 박을 OWASP 태그(§8 예시 "OWASP LLM06 Excessive Agency" 재현용).
@@ -87,6 +100,37 @@ def featurize(args: dict[str, Any]) -> dict[str, Any] | None:
     return {"statement_type": statement_type, "target": target, "class": klass}
 
 
+# path featurizer(§7 스트레치, §10 fnmatch/pathlib, 이슈 #76)가 tool_name을
+# 글롭 매칭해 연산 종류를 구분하는 데 쓰는 패턴. SQL과 달리 path 도구는
+# 보통 {"path": "..."} 인자뿐이라 값만으로는 삭제/조회를 구분할 신호가 없다.
+_PATH_DESTRUCTIVE_TOOL_GLOBS = ("delete_*", "remove_*", "overwrite_*", "*_delete", "*_remove")
+_PATH_READ_TOOL_GLOBS = ("read_*", "get_*", "list_*", "*_read", "*_get")
+
+
+def featurize_path(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+    """path featurizer (§7 스트레치, §10 fnmatch/pathlib, 이슈 #76).
+
+    args["path"]가 없으면 이 featurizer 대상이 아니다(None) — 호출자
+    (rule_matches)가 featurize()(SQL)로 폴백한다. tool_name이 위 글롭
+    어디에도 안 걸리면 "알 수 없는 연산"이라 역시 None을 반환한다 —
+    §7 "틀려도 안전한 방향"에 따라 미상 연산을 조용히 SAFE로 분류하지
+    않는다.
+    """
+    path = args.get("path")
+    if not isinstance(path, str):
+        return None
+
+    if any(fnmatch.fnmatch(tool_name, glob) for glob in _PATH_DESTRUCTIVE_TOOL_GLOBS):
+        klass = "PATH_DESTRUCTIVE"
+    elif any(fnmatch.fnmatch(tool_name, glob) for glob in _PATH_READ_TOOL_GLOBS):
+        klass = "PATH_SAFE"
+    else:
+        return None
+
+    target = PurePosixPath(path).name  # SQL의 target(테이블명)과 대칭되는 필드
+    return {"statement_type": None, "target": target, "class": klass}
+
+
 def _extract_target(parsed: exp.Expression) -> str | None:
     """DROP/TRUNCATE/DELETE/UPDATE의 대상 테이블명. 그 외 문형은 None
     (rule_matches/synthesize_rule은 class만 쓰고 target은 참고용)."""
@@ -112,7 +156,8 @@ def rule_matches(rule: dict[str, Any], evt: dict[str, Any]) -> bool:
     class_spec = features.get("class")
     if class_spec is not None:
         allowed = class_spec.get("in", []) if isinstance(class_spec, dict) else [class_spec]
-        evt_features = featurize(evt.get("args") or {})
+        evt_args = evt.get("args") or {}
+        evt_features = featurize(evt_args) or featurize_path(evt.get("tool_name", ""), evt_args)
         evt_class = evt_features.get("class") if evt_features else None
         if evt_class not in allowed:
             return False

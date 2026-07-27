@@ -248,6 +248,18 @@ class EventStore:
             self._write_line(event)
             return event
 
+    def peek_next_seq(self) -> int:
+        """다음 record_tool_wrap 호출이 부여할 seq를 조회 전용으로 반환한다.
+
+        observe_model 배선(harness._observe)이 model_client 이벤트의
+        parent_seq를 예측하는 데 쓴다(§9/§11 — 렌더링 힌트일 뿐 §6
+        리플레이 매칭 키로는 쓰이지 않으므로 예측이 어긋나도 안전하다).
+        self._seq를 증가시키지 않는다. [E] 스레드 안전 컨벤션과
+        일관되게 self._lock 안에서 읽는다.
+        """
+        with self._lock:
+            return self._seq
+
     # ---- outcome ([C]) ----
 
     def record_outcome(

@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import functools
 import inspect
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from rein.adapters import is_recognized_adapter
+from rein.adapters import _patch_target_for, extract_tool_calls_for, is_recognized_adapter
 from rein.events import SEVERITY_WARNING, EventStore
 from rein.guardrails import StageFn, load_stage_order, resolve_stage_order
 from rein.guardrails.exceptions import ApprovalRequired, Denied, RetryRequested
@@ -160,6 +161,10 @@ class Harness:
         # seed + §5/§9 분리만 담당.
         self._session_state: dict[str, Any] = dict(self._context) if self._context else {}
         self._observed_client: Any | None = None  # §3: 기본 비활성
+        # observe_model이 몽키패치한 (owner, attr_name, original) —
+        # __exit__에서 원상 복구할 때 쓴다. 빌트인이 아닌(duck-typed)
+        # 클라이언트는 패치 대상이 없어 None으로 남는다.
+        self._patch_state: tuple[Any, str, Callable] | None = None
         self._custom_stages: dict[str, StageFn] = {}
         # live-rerun: 실제 함수 호출 직전 위치 매칭(§6)에 쓸 엔진.
         # record 모드에서는 None으로 두어 _intercept가 match()를 건너뛴다.
@@ -251,6 +256,13 @@ class Harness:
         §3 fail-closed: 어댑터 인식 검증은 _observe 진입 "전"에만. 검증
         통과해야만 self._observed_client가 세팅되어 _observe()의 if문이
         풀린다.
+
+        빌트인(OpenAI/Anthropic) 클라이언트는 실제 호출 메서드를
+        몽키패치해 매 응답을 자동으로 _observe()에 흘려보낸다(#73
+        배선). duck-typed 커스텀/로컬 클라이언트는 호출 진입점을 알
+        수 없어 자동 배선 대상이 아니다 — _observed_client만 세팅되고,
+        사용자가 자기 호출부에서 harness._observe(response)를 직접
+        호출해야 한다.
         """
         if not is_recognized_adapter(client):
             raise TypeError(
@@ -260,7 +272,51 @@ class Harness:
                 "로컬 클라이언트는 §3 TODO에 따라 자동 감지 대상이 아니므로 "
                 "extract_tool_calls(response)를 직접 구현해야 합니다."
             )
+
+        target = _patch_target_for(client)
+
+        # 같은 클라이언트로 재호출된 경우: 이미 패치돼 있으면 idempotent
+        # 하게 아무것도 다시 하지 않는다. 이 체크는 아래 "이전 패치 원복"
+        # 보다 먼저 해야 한다 — 먼저 원복부터 하면 마커가 사라져 매번
+        # 새로 래핑(이중 래핑)하게 된다.
+        if target is not None:
+            owner, attr_name = target
+            current = getattr(owner, attr_name)
+            if getattr(current, "__rein_observed__", False):
+                self._observed_client = client
+                return
+
+        # 이전에 (다른 클라이언트를) 관측 중이었다면 그 패치부터 원복 —
+        # 덮어써서 고아 패치로 남기지 않는다.
+        if self._patch_state is not None:
+            owner, attr_name, original = self._patch_state
+            setattr(owner, attr_name, original)
+            self._patch_state = None
+
         self._observed_client = client
+
+        if target is None:
+            # duck-typed/커스텀: 호출 경로를 몰라 자동 배선 불가.
+            return
+
+        owner, attr_name = target
+        original = getattr(owner, attr_name)
+
+        @functools.wraps(original)
+        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            response = original(*args, **kwargs)
+            try:
+                self._observe(response)
+            except Exception as exc:
+                # §3: 관측 표면은 기록 전용(fail-open) — _intercept의
+                # fail-closed와 정반대. 관측 실패가 에이전트 실행
+                # 자체를 막으면 안 되므로 예외를 삼키고 경고만 남긴다.
+                warnings.warn(f"observe_model: 응답 관측 실패: {exc!r}", stacklevel=2)
+            return response
+
+        _wrapped.__rein_observed__ = True  # type: ignore[attr-defined]
+        setattr(owner, attr_name, _wrapped)
+        self._patch_state = (owner, attr_name, original)
 
     def _intercept(
         self,
@@ -356,16 +412,27 @@ class Harness:
         같은 거짓 안전감을 주기 때문이다. 옵트인 정책(§3)에 따라
         self._observed_client가 없으면 아무 동작도 하지 않는다.
 
-        PR #4 범위: default-off 동결만. 옵트인 시 실제 모델 응답을 가로채는
-        패치는 후속 PR의 wiring 책임이며, 그 PR에서 self._observed_client로
-        저장된 클라이언트의 응답을 여기 _observe()로 흘려보낸다.
+        #73: extract_tool_calls_for로 tool_use를 추출해 model_client
+        이벤트로 기록한다. parent_seq는 EventStore.peek_next_seq()로
+        "다음에 올 tool_wrap의 seq"를 예측한 값이다 — 일반적인 에이전트
+        루프(모델이 tool_use 제안 → 그 도구를 바로 호출)에서는 정확히
+        맞아떨어지며, §9/§11에 따라 이 필드는 타임라인 렌더링 힌트일
+        뿐 §6 리플레이 매칭에는 쓰이지 않으므로 예측이 어긋나도 안전하다.
         """
         if self._observed_client is None:
             return  # §3 default-off — 명시적 활성화 없이는 절대 실행되지 않음.
 
-        # TODO(후속 PR): 어댑터를 통해 tool_use를 추출하고 저장소에 기록.
-        #               §9 스키마상 source=model_client, verdict=null,
-        #               parent_seq=선행 tool_wrap의 seq, seq 자체는 null.
+        tool_uses = extract_tool_calls_for(self._observed_client, response_or_event)
+        if not tool_uses:
+            return
+
+        parent_seq = self._event_store.peek_next_seq()
+        for tool_use in tool_uses:
+            self._event_store.record_model_client(
+                parent_seq=parent_seq,
+                tool_name=tool_use.name,
+                proposed_args=tool_use.args,
+            )
 
     def _sealed_pipeline(self) -> list[tuple[str, StageFn]]:
         """_activate()에서 확정된 stage_order를 (name, fn) 페어로 노출.
@@ -444,7 +511,12 @@ class Harness:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        # TODO(현준): observe_model()로 등록된 클라이언트가 있다면 여기서
-        # 원상 복구/정리한다. __exit__은 정리 전용이지 집행 지점이 아니다.
+        # #73: observe_model()이 몽키패치했다면 원본 메서드로 복구한다.
+        # __exit__은 정리 전용이지 집행 지점이 아니므로 exc_type과
+        # 무관하게 항상 복구한다.
+        if self._patch_state is not None:
+            owner, attr_name, original = self._patch_state
+            setattr(owner, attr_name, original)
+            self._patch_state = None
         self._event_store.close()
         return None

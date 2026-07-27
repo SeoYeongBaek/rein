@@ -8,6 +8,7 @@ import pytest
 
 from rein.rules import (
     featurize,
+    featurize_path,
     load_permission_table,
     permission_table_negatives,
     rule_matches,
@@ -89,6 +90,57 @@ def test_featurize_non_sql_args_returns_none():
 
 def test_featurize_unparseable_query_returns_none():
     assert featurize({"query": "not valid sql ((("}) is None
+
+
+# ── featurize_path (§7 스트레치, §10 fnmatch/pathlib, 이슈 #76) ──────────────────
+
+
+def _path_evt(evt: str, tool_name: str, path: str, role: str | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": "v1",
+        "evt": evt,
+        "seq": int(evt.split("_")[-1]),
+        "source": "tool_wrap",
+        "tool_name": tool_name,
+        "args": {"path": path},
+        "context": {"agent_role": role} if role is not None else {},
+        "verdict": "allow",
+        "outcome": {"status": "ok", "severity": "info", "detail": ""},
+    }
+
+
+def test_featurize_path_classifies_delete_as_destructive():
+    f = featurize_path("delete_file", {"path": "/data/report.csv"})
+    assert f is not None
+    assert f["class"] == "PATH_DESTRUCTIVE"
+    assert f["target"] == "report.csv"
+
+
+def test_featurize_path_classifies_read_as_safe():
+    f = featurize_path("read_file", {"path": "/data/report.csv"})
+    assert f is not None
+    assert f["class"] == "PATH_SAFE"
+
+
+def test_featurize_path_returns_none_without_path_arg():
+    assert featurize_path("delete_file", {"query": "SELECT 1"}) is None
+
+
+def test_featurize_path_returns_none_for_unknown_tool_pattern():
+    """§7 '틀려도 안전한 방향' — 미상 tool_name은 조용히 SAFE로 분류하지 않는다."""
+    assert featurize_path("process_file", {"path": "/data/report.csv"}) is None
+
+
+def test_rule_matches_falls_back_to_path_featurizer_when_sql_fails():
+    """rule_matches는 SQL featurize가 실패하면(§76) path featurizer로 폴백한다
+    — 회귀 매트릭스 1건 최소 증명(§10)."""
+    rule = {"when": {"tool": "delete_file", "features": {"class": {"in": ["PATH_DESTRUCTIVE"]}}}}
+
+    positive = _path_evt("evt_0001", "delete_file", "/data/users.csv")
+    negative = _path_evt("evt_0002", "read_file", "/data/users.csv")
+
+    assert rule_matches(rule, positive) is True
+    assert rule_matches(rule, negative) is False
 
 
 # ── synthesize_rule ───────────────────────────────────────────────────────────

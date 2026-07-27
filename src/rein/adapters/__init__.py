@@ -45,6 +45,31 @@ def _builtin_kind(client: Any) -> str | None:
     return None
 
 
+def _patch_target_for(client: Any) -> tuple[Any, str] | None:
+    """observe_model 자동 배선(몽키패치) 대상 (owner, attr_name) 조회.
+
+    빌트인(OpenAI/Anthropic)에만 적용한다. duck-typed 커스텀/로컬
+    클라이언트는 §3 두 번째 갈래(extract_tool_calls 구현 여부)로
+    "인식"은 되지만, 실제 호출 진입점(메서드명, 시그니처, 동기/스트리밍
+    여부)에 대해서는 아무 계약도 없다 — 그런 객체의 임의 속성을
+    자동으로 덮어쓰는 것은 안전하지 않으므로 None을 반환해 자동
+    배선을 포기한다(harness.observe_model이 _observed_client만
+    세팅하고 패치는 건너뛴다). 이 경우 사용자가 자기 호출부에서
+    직접 harness._observe(response)를 호출해야 한다.
+    """
+    kind = _builtin_kind(client)
+    if kind == "openai":
+        owner = getattr(client, "chat", None)
+        owner = getattr(owner, "completions", None) if owner is not None else None
+    elif kind == "anthropic":
+        owner = getattr(client, "messages", None)
+    else:
+        return None
+    if owner is None or not callable(getattr(owner, "create", None)):
+        return None  # 예상 구조와 다름 — 방어적으로 자동 배선 포기
+    return owner, "create"
+
+
 def is_recognized_adapter(client: Any) -> bool:
     """§3 어댑터 인식 판정.
 

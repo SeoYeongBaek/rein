@@ -298,6 +298,31 @@ class TestReplayMatchingUnaffected:
         assert all(e["seq"] is None for e in mc_events)
 
 
+# === #73: peek_next_seq — observe_model 배선의 parent_seq 예측용 ===
+
+
+class TestPeekNextSeq:
+    """peek_next_seq()는 다음 record_tool_wrap이 부여할 seq를 조회
+    전용으로 반환하며, 다른 record_* 호출로는 값이 바뀌지 않는다."""
+
+    def test_initial_value_is_zero(self, tmp_store: EventStore) -> None:
+        assert tmp_store.peek_next_seq() == 0
+
+    def test_increments_only_after_tool_wrap(self, tmp_store: EventStore) -> None:
+        assert tmp_store.peek_next_seq() == 0
+        tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        assert tmp_store.peek_next_seq() == 1
+
+    def test_model_client_and_outcome_do_not_change_peek(self, tmp_store: EventStore) -> None:
+        event = tmp_store.record_tool_wrap(tool_name="t", args={}, context=None, verdict="allow")
+        before = tmp_store.peek_next_seq()
+
+        tmp_store.record_model_client(parent_seq=before, tool_name="t", proposed_args={})
+        tmp_store.record_outcome(event, status="ok", severity="info")
+
+        assert tmp_store.peek_next_seq() == before
+
+
 # === 이슈 #31/#37: record_error의 severity는 조용한 기본값 없이 필수 ===
 
 
