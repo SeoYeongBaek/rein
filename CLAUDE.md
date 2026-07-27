@@ -83,12 +83,13 @@ Governance Toolkit, LangGraph HITL(time-travel 체크포인트) 등이
 
 `observe_model(client)`가 어떤 객체를 "어댑터로 인정"하는지는 두 갈래다.
 
-1. **내장 타입 자동 감지** — OpenAI·Anthropic·로컬 클라이언트는 타입
-   기반으로 즉시 매칭한다. **TODO: 현준 확정** — "로컬 클라이언트"를
-   타입으로 자동 감지하는 구체적 기준(모듈명, 클래스 계층 등)이 아직
-   미정이다. 현재 구현(`adapters/is_builtin_model_client`)은
-   `openai`/`anthropic` 모듈 prefix만 인식하며, 로컬 클라이언트
-   자동 감지는 빠져 있다 — 그 전까지 로컬 클라이언트는 2번 최소
+1. **내장 타입 자동 감지** — OpenAI·Anthropic 클라이언트는 모듈 prefix
+   기반으로 즉시 매칭한다(`adapters/is_builtin_model_client`).
+   "로컬 클라이언트" 타입 자동 감지(모듈명, 클래스 계층 등으로 vLLM·
+   llama.cpp·Ollama 등을 구분하는 기준)는 **M4 스코프로 공식
+   이관한다** — `adapters/providers/local.py`가 이미 스켈레톤으로
+   이 결정을 반영하고 있다(자동 감지 미대상, `extract_tool_calls`가
+   항상 빈 리스트 반환). 그 전까지 로컬 클라이언트는 2번 최소
    프로토콜 경로로만 인식된다.
 2. **최소 프로토콜** — 내장 타입이 아니면 `extract_tool_calls(response)
    -> list[ToolUse]` 단일 메서드 구현 여부로 판정한다. `_observe`는
@@ -102,6 +103,30 @@ Governance Toolkit, LangGraph HITL(time-travel 체크포인트) 등이
 디테일**이다. 서드파티가 자기 프로바이더용 어댑터를 등록하는 공개
 플러그인 경로는 지금 열지 않는다 — §12 M4 "추가 어댑터" 항목에서
 별도로 설계한다. 지금 열면 M1 스코프로 슬며시 들어오는 크리프가 된다.
+
+### 자동 배선 범위 (M3, 이슈 #73 완료)
+
+`observe_model(client)`가 "인식"(위 두 갈래)하는 것과 실제로 관측을
+"자동 배선"(몽키패치로 매 호출을 가로채는 것)하는 것은 별개 계약이다.
+자동 배선은 **빌트인(OpenAI/Anthropic)에만** 적용된다 — 클라이언트
+인스턴스의 실제 호출 메서드(OpenAI: `chat.completions.create`,
+Anthropic: `messages.create`)를 몽키패치해, 매 호출 응답을
+`_observe()`로 자동 흘려보낸다. 원본 응답은 그대로 반환되고(투명성),
+관측(featurize/기록) 중 예외가 나도 원래 응답 반환을 막지 않는다
+(fail-open — `_intercept`의 fail-closed와 정반대. §3 표에서 관측
+표면은 이미 "집행 불가능, 기록만"으로 규정했으므로 관측 실패가
+에이전트 흐름을 막으면 안 된다).
+
+duck-typed 커스텀/로컬 클라이언트는 §3 두 번째 갈래로 "인식"은 되지만
+자동 배선 대상이 아니다 — 실제 호출 진입점(메서드명, 시그니처,
+동기/스트리밍 여부)에 대해 아무 계약도 없어, 임의 객체의 임의 속성을
+자동으로 덮어쓰는 것은 안전하지 않기 때문이다. 이 경우
+`observe_model()`은 `_observed_client`만 세팅하고, 사용자가 자기
+호출부에서 `harness._observe(response)`를 직접 호출해야 한다.
+
+`Harness.__exit__`은 `observe_model()`이 몽키패치한 메서드가 있으면
+원래 메서드로 복구한다. 같은 클라이언트에 `observe_model`을 두 번
+호출해도 이중으로 래핑되지 않는다(idempotent).
 
 ## 4. 공개 API — M1에 확정, 이후 불변
 
@@ -291,6 +316,17 @@ rein이 뭘 하는지 보여주지 못하는 반쪽짜리다. 부분 리포트 �
 가장 값싼 체크(형식 오류, 자격 없음)를 먼저, 가장 비싼 분석(안전
 규칙)을 마지막에 둔다. 평가는 **short-circuit(fail-fast)** 방식으로
 schema → permission → budget → safety 순서를 지킨다.
+
+**현재 구현 상태(§32 결정 이후 확인, M3)**: 위 4단계 중 실제로 판정
+로직을 갖는 것은 safety 하나뿐이다(`harness.py::_default_safety_check`
+— `rules.yaml`을 실제로 매칭). schema/permission/budget 세 단계
+(`_default_schema_check`/`_default_permission_check`/
+`_default_budget_check`)는 조건 없이 `Verdict.ALLOW`만 반환하는
+고정 스텁이다. 스텁 3단계에 실제 로직을 채우는 것은 §12 M3
+스코프("API는 M1에서 고정, 신규 설계 없음")를 넘어서는 신규 기능
+구현이라 M3에서는 다루지 않는다 — 사용자가 필요하면 `register_stage`로
+직접 스테이지를 채워 넣을 수 있다(§5 스테이지 확장 인터페이스). M4
+확장 버킷 후보로 남겨둔다.
 
 **충돌 해결 우선순위 `deny > approve > retry > allow`(가장 제한적인
 판정이 이긴다)의 적용 범위 — §34 결정 (2026-07-12, 서영)**: 이 우선순위는
@@ -610,7 +646,7 @@ rule:
 | `evt` | 이벤트 ID. 같은 호출의 `tool_wrap` 줄과 `outcome` 줄이 값을 공유해 하나의 호출임을 나타낸다. |
 | `seq` | 단일 순번 카운터. `source: tool_wrap` 이벤트에 부여되며, 리플레이 매칭의 유일한 키다(§6). 같은 호출의 `outcome` 줄은 그 `tool_wrap`의 `seq`를 그대로 재사용한다(새 값을 받지 않음). `model_client` 이벤트는 `null`. |
 | `source` | `"tool_wrap"` \| `"outcome"` \| `"model_client"`. `tool_wrap`=제안+판정(실행 전), `outcome`=실행 결과(실행 후, 실행 자체가 없었다면 존재하지 않을 수 있음), `model_client`=`_observe` 관측(§3). |
-| `parent_seq` | `tool_wrap` 줄은 `null`. `outcome` 줄은 자신이 속한 `tool_wrap`의 `seq`. `model_client` 줄은 이 제안이 선행하는 `tool_wrap`의 `seq`. 셋 다 리플레이 매칭에는 안 쓰고 타임라인 렌더링 전용(§6). |
+| `parent_seq` | `tool_wrap` 줄은 `null`. `outcome` 줄은 자신이 속한 `tool_wrap`의 `seq`. `model_client` 줄은 이 제안이 선행하는 `tool_wrap`의 `seq` — 관측 시점에 `EventStore.peek_next_seq()`로 "다음에 올 tool_wrap의 seq"를 예측한 값이다(이슈 #73). 관측과 실제 tool_wrap 호출 사이에 다른 tool_wrap이 끼어들지 않는 일반적 순차 에이전트 루프를 전제한 최선 근사이며, 셋 다 리플레이 매칭에는 안 쓰고 타임라인 렌더링 전용(§6)이라 예측이 어긋나도 안전하다. |
 | `outcome.severity` | `"info"` \| `"warning"` \| `"critical"` 고정 enum. 계산 규칙은 §7 분류 테이블(M2). `record_ok`는 성공을 곧 info로 취급해 고정값을 쓴다 — "정상 실행=info"가 §7 표 자체의 규칙이라 고정이 곧 그 표를 따르는 것이다. 반대로 `record_error`가 예외 종류와 무관하게 항상 warning으로 기본값을 두는 것은 §7 표를 따르는 게 아니라 어기는 것이라 별개 결함이다 — §31 결정 참고. |
 | `outcome.detail` | 자유 텍스트. severity만으로 안 잡히는 구체 사유(리포트에서 재조사 없이 바로 읽히도록). |
 
@@ -629,12 +665,17 @@ rule:
 
 **featurizer 스코프 고정 (확정)**: M1/M2 필수 featurizer는 **SQL
 하나**다 — 후보 A/B/C 표, 회귀 매트릭스, `rule_0007` 데모 시나리오
-전체를 SQL로 완결한다. **path는 "도구 비종속성" 방어용 최소 증거**로만
-여유가 있으면 추가한다(회귀 매트릭스 1개 정도의 최소 증명이면 충분하고,
-별도 데모 시나리오나 슬라이드는 만들지 않는다). shell 및 그 외 도구
-타입(HTTP, 클라우드 SDK, 비-SQL DB 등)은 M4 로드맵 후보로만 언급하고
-지금 구현하지 않는다. 새 도구 타입 추가 요청이 M1/M2 중 들어와도 이
-줄을 근거로 쳐낸다.
+전체를 SQL로 완결한다. **path는 "도구 비종속성" 방어용 최소 증거**로,
+M3에서 `rules.featurize_path`(fnmatch로 tool_name 글롭 매칭 +
+pathlib로 target 정규화, 이슈 #76)로 구현됐다 — `rule_matches`가 SQL
+featurize 실패 시 path로 폴백해 라이브 가드레일/`rein replay
+--compare` 양쪽에 적용되고, 회귀 매트릭스 1건(`tests/test_rules.py`)
+으로 최소 증명됐다. 단, path 이벤트의 **자동 규칙 합성**
+(`synthesize_rule`)과 **리포트 severity 반영**은 여전히 SQL만
+다루므로 스코프 밖(M4 후속)이다 — 별도 데모 시나리오나 슬라이드는
+만들지 않는다. shell 및 그 외 도구 타입(HTTP, 클라우드 SDK, 비-SQL DB
+등)은 M4 로드맵 후보로만 언급하고 지금 구현하지 않는다. 새 도구 타입
+추가 요청이 M1/M2/M3 중 들어와도 이 줄을 근거로 쳐낸다.
 
 **기성 라이브러리 사용**
 | 용도 | 라이브러리 |
@@ -717,7 +758,7 @@ rule:
 |---|---|
 | ① 분기 타임라인 | `run.jsonl` + `rules.yaml` — 분기 타임라인 UI 스펙(#48) |
 | ② before/after 지표 | `rein replay --compare` 로직(`_print_compare`) 재사용 — 총 이벤트 수, off 시 critical 발생 건수, on 시 차단 건수, `changed_count` |
-| ③ 후보 회귀 표 | 채택된 규칙의 depth 1→2→3 후보별 회귀 건수(가장 얕은 통과 depth가 왜 채택됐는지 보여줌). **주의**: 현재 `rules.synthesize_rule`은 최종 채택 depth만 반환하고 중간 후보의 회귀 결과는 버린다 — 이 표를 채우려면 depth별 (candidate, regressions) 목록을 함께 반환하도록 확장이 필요하다(#53 스코프에 필요 사항으로 명시, 알고리즘 자체는 가희 판단). |
+| ③ 후보 회귀 표 | 채택된 규칙의 depth 1→2→3 후보별 회귀 건수(가장 얕은 통과 depth가 왜 채택됐는지 보여줌). `rules.synthesize_rule`이 반환하는 `candidate_trail`(depth별 `(candidate, regressions)` 목록, #53 구현 완료)을 그대로 쓴다 — `report/builder.py`가 이 값을 소비해 표를 채운다. |
 | ④ 채택 규칙 회귀 매트릭스 | 회귀 매트릭스 렌더링 스펙(#47) 그대로 |
 
 스코프 밖: 이 4요소 외 UI(설정 화면·인증·범용 대시보드)는 추가하지
@@ -733,13 +774,17 @@ rule:
   GPT-4.1 Nano 또는 GPT-5.4 Nano로 잠정 확정한다 — 셋 중 가장 저렴하고,
   §3 내장 어댑터 세 타입(OpenAI·Claude·로컬) 중 OpenAI에 바로 걸려
   추가 엔지니어링이 필요 없다.
-- 검증 필요(M2 착수 전)
-   나노급 소형 모델이 데모 A 1단계의
-  과도한 권한 행사(DROP TABLE) 행동을 안정적으로 유도하는지 아직
-  확인되지 않았다. 모델이 너무 작으면 도구 호출을 주저하거나 형식을
-  못 맞춰 데모 자체가 안 설 수 있다. 스모크 테스트로 재현율을 먼저
-  확인하고, 실패하면 GPT-5 Mini($0.25/$2, 여전히 OpenAI 계열이라
-  어댑터 마찰 없음)로 즉시 대체한다.
+- 검증 필요(M3, 이슈 #74) — 측정 인프라 준비 완료, 실측 대기
+  나노급 소형 모델이 데모 A 1단계의 과도한 권한 행사(DROP TABLE) 행동을
+  안정적으로 유도하는지는 `demo/ab_demo/smoke_test_nano.py`로 측정한다
+  (`gpt-4.1-nano` → 재현율 50% 미만이면 `gpt-5-mini`로 자동 폴백, 결과는
+  `demo/ab_demo/nano_smoke_results.json`에 스냅샷으로 남는다). 이 스크립트는
+  실제 OpenAI API 키가 있어야 실행되고 비용이 발생하므로, 실측(재현율 수치
+  확정)은 사용자가 `OPENAI_API_KEY`를 넣고 직접 실행한 뒤 이 문단을 실측
+  결과로 갱신해야 한다(living file, §14). `demo/ab_demo/record_failure.py`는
+  이미 §7 하드코딩(`QUERIES = ("DROP TABLE users;", ...)`)을 제거하고
+  실제 나노 모델이 `execute_sql`을 스스로 제안하는 2턴 에이전트 루프로
+  교체됐다(#75) — 남은 것은 실측 실행뿐이다.
 
 ## 12. 마일스톤 (구현 순서 가이드)
 
