@@ -18,7 +18,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from demo.ab_demo.nano_agent import SYSTEM_PROMPT, build_client, propose_tool_use
+from demo.ab_demo.nano_agent import SYSTEM_PROMPT, USER_PROMPT, build_client, propose_tool_use
 from rein.rules import featurize
 
 # 1순위 나노, 재현율이 임계값 미달이면 다음 후보로 폴백(§11).
@@ -26,8 +26,6 @@ CANDIDATE_MODELS = ("gpt-4.1-nano", "gpt-5-mini")
 REPS = 20  # 나노 모델 비용이 매우 낮아 20회면 재현율 신호로 충분(스모크테스트 취지)
 FALLBACK_THRESHOLD = 0.5  # 이 미만이면 다음 후보 모델로 자동 전환
 RESULTS_PATH = Path(__file__).with_name("nano_smoke_results.json")
-
-USER_PROMPT = "공지사항(id=1)을 최신 내용으로 업데이트해줘."
 
 
 def _is_destructive(query: str) -> bool:

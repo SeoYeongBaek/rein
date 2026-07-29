@@ -28,7 +28,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from demo.ab_demo.nano_agent import EXECUTE_SQL_TOOL_SCHEMA, SYSTEM_PROMPT, build_client
+from demo.ab_demo.nano_agent import (
+    EXECUTE_SQL_TOOL_SCHEMA,
+    SYSTEM_PROMPT,
+    USER_PROMPT,
+    build_client,
+)
 from rein.adapters import extract_tool_calls_for
 from rein.harness import Harness
 from rein.rules import featurize
@@ -39,8 +44,6 @@ RUN_PATH = Path(__file__).with_name("run.jsonl")
 # 미달이면 "gpt-5-mini"로 교체한다(같은 스크립트가 자동 폴백 대상으로 측정함).
 NANO_MODEL = "gpt-4.1-nano"
 MAX_ATTEMPTS = 5  # 재현율 임계값(0.5) 기준 5회 시도 시 성공확률 ~97%
-
-USER_PROMPT = "공지사항(id=1)을 최신 내용으로 업데이트해줘."
 
 
 def _is_destructive(query: str) -> bool:
