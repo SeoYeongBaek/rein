@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rein.adapters import ToolUse, register_adapter
 from rein.harness import Harness
 
 # ---- 가짜 OpenAI SDK 모양 클라이언트 ----
@@ -239,3 +240,60 @@ def test_observe_failure_is_fail_open(harness, monkeypatch):
         result = client.chat.completions.create(model="gpt-4.1-nano", messages=[])
 
     assert result is response  # 관측이 터져도 원래 응답은 정상 반환
+
+
+def test_registered_third_party_adapter_not_auto_wired(harness):
+    """#80: register_adapter로 등록된 서드파티는 인식되지만 자동
+    몽키패치 배선 대상이 아니다 — duck-typed 커스텀 클라이언트와
+    동일하게 _observed_client만 세팅된다."""
+
+    class _VLLMAdapter:
+        def extract_tool_calls(self, response):
+            return []
+
+    class _FakeVLLMClient:
+        pass
+
+    _FakeVLLMClient.__module__ = "vllm.entrypoints"
+    register_adapter("vllm", _VLLMAdapter())
+
+    client = _FakeVLLMClient()
+    harness.observe_model(client)
+
+    assert harness._observed_client is client
+    assert harness._patch_state is None
+
+
+def test_registered_third_party_adapter_observed_end_to_end(harness):
+    """리뷰 finding 4 (#80): register_adapter -> observe_model ->
+    _observe 직접 호출까지 실제로 이어붙였을 때, 서드파티 어댑터가
+    추출한 tool_use가 JSONL의 model_client 줄로 정말 남는지 검증한다.
+    단위 테스트(test_adapters.py)는 extract_tool_calls_for 라우팅만,
+    test_registered_third_party_adapter_not_auto_wired는 자동 배선이
+    '안' 되는 것만 확인해, 사용자가 실제로 밟게 될 조합 흐름(등록 ->
+    observe_model -> harness._observe(response) 수동 호출 -> 로그 확인)
+    은 이전까지 아무 테스트도 커버하지 않았다."""
+
+    class _VLLMAdapter:
+        def extract_tool_calls(self, response):
+            return [ToolUse(name="run_shell", args={"cmd": "ls"})]
+
+    class _FakeVLLMClient:
+        pass
+
+    _FakeVLLMClient.__module__ = "vllm.entrypoints"
+    register_adapter("vllm", _VLLMAdapter())
+
+    client = _FakeVLLMClient()
+    harness.observe_model(client)
+
+    # 서드파티 클라이언트는 자동 배선 대상이 아니므로(§3), 사용자가
+    # 자기 호출부에서 harness._observe(response)를 직접 호출해야 한다.
+    harness._observe({"anything": "raw response shape은 어댑터가 해석"})
+    harness._event_store.close()
+
+    events = _read_jsonl(harness.record_path)
+    model_events = [e for e in events if e["source"] == "model_client"]
+    assert len(model_events) == 1
+    assert model_events[0]["tool_name"] == "run_shell"
+    assert model_events[0]["args"] == {"cmd": "ls"}

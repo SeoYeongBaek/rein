@@ -99,10 +99,45 @@ Governance Toolkit, LangGraph HITL(time-travel 체크포인트) 등이
 두 조건 다 만족하지 않으면 `observe_model()` 호출 시점에 즉시 에러 —
 §5 `stage_order`와 같은 fail-closed 패턴이다.
 
-이 프로토콜은 **공개 확장 포인트가 아니라 내장 어댑터의 내부 구현
-디테일**이다. 서드파티가 자기 프로바이더용 어댑터를 등록하는 공개
-플러그인 경로는 지금 열지 않는다 — §12 M4 "추가 어댑터" 항목에서
-별도로 설계한다. 지금 열면 M1 스코프로 슬며시 들어오는 크리프가 된다.
+이 두 갈래(내장 자동 감지 / 최소 프로토콜)는 내장 어댑터의 내부 구현
+디테일이었지만, **M4(#80)에서 서드파티 공개 플러그인 경로가 열렸다**:
+`rein.adapters.register_adapter(module_prefix: str, adapter:
+ModelAdapter) -> None`으로 자기 프로바이더 prefix를 등록하면, 사용자는
+원시 클라이언트를 그대로 `observe_model(client)`에 넘기는 것만으로
+내장(openai/anthropic)과 동일한 경로로 인식·라우팅된다.
+
+```python
+# 서드파티 패키지 내부
+from rein.adapters import register_adapter, ModelAdapter
+
+class VLLMAdapter:  # 상속 불필요 — 구조적 만족(Protocol)
+    def extract_tool_calls(self, response) -> list[ToolUse]: ...
+
+register_adapter("vllm", VLLMAdapter())
+```
+
+같은 `module_prefix`에 '다른' 어댑터가 이미 등록돼 있으면
+`register_adapter()`가 즉시 `ValueError`(fail-closed) — 두 서드파티
+패키지의 prefix 충돌을 조용히 덮어쓰지 않는다. 동일 객체(identity)
+재등록은 idempotent하게 허용한다.
+
+**자동 몽키패치 배선(아래 "자동 배선 범위" 절)은 여전히
+내장(OpenAI/Anthropic) 전용이다.** `register_adapter`로 등록된
+서드파티 클라이언트는 인식·라우팅만 되고, 호출 메서드 자동 가로채기
+대상은 아니다 — 호출 진입점(메서드명·시그니처·동기/스트리밍 여부)에
+대한 계약이 없는 임의 객체의 속성을 자동으로 덮어쓰는 것은 안전하지
+않기 때문이다(§3 자동 배선 범위 절과 동일 근거). 이 경우 사용자가
+`harness._observe(response)`를 직접 호출해야 한다.
+
+entry_points/setuptools 기반 자동 탐색(설치만 해도 import 없이
+인식되는 방식)은 채택하지 않았다 — 사용자가 서드파티 패키지를
+명시적으로 `import`해야 등록 side effect가 실행되는 편이 "숨은 마법
+없음" 원칙(§5 fail-closed)과 일관된다.
+
+vLLM/Ollama 등 구체적인 로컬 런타임용 어댑터 구현 자체는 이 공개
+프로토콜과 별개다 — `providers/local.py`는 여전히 스켈레톤이며,
+로컬 클라이언트를 내장 자동 감지(module prefix) 목록에 추가할지는
+별도 결정 사항이다(§3 "로컬 클라이언트" TODO는 아래 그대로 유지).
 
 ### 자동 배선 범위 (M3, 이슈 #73 완료)
 
