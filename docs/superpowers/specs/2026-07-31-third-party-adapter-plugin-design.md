@@ -101,8 +101,8 @@ def register_adapter(module_prefix: str, adapter: ModelAdapter) -> None:
 # 서드파티 패키지(예: rein_vllm_adapter) 내부
 from rein.adapters import register_adapter, ModelAdapter
 
-class VLLMAdapter(ModelAdapter):
-    def extract_tool_calls(self, response): ...
+class VLLMAdapter:  # 상속 불필요 — 구조적 만족(Protocol)
+    def extract_tool_calls(self, response) -> list[ToolUse]: ...
 
 register_adapter("vllm", VLLMAdapter())
 ```

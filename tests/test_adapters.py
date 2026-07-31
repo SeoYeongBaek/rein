@@ -433,11 +433,7 @@ def test_model_adapter_protocol_is_structural():
     assert isinstance(_ThirdPartyAdapter(), ModelAdapter)
 
 
-def test_register_adapter_makes_prefix_recognized(monkeypatch):
-    import rein.adapters as adapters_mod
-
-    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
-
+def test_register_adapter_makes_prefix_recognized():
     class _FakeVLLMClient:
         pass
 
@@ -449,11 +445,7 @@ def test_register_adapter_makes_prefix_recognized(monkeypatch):
     assert is_recognized_adapter(_FakeVLLMClient()) is True
 
 
-def test_register_adapter_routes_extract_tool_calls_for(monkeypatch):
-    import rein.adapters as adapters_mod
-
-    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
-
+def test_register_adapter_routes_extract_tool_calls_for():
     class _FakeVLLMClient:
         pass
 
@@ -466,21 +458,15 @@ def test_register_adapter_routes_extract_tool_calls_for(monkeypatch):
     assert out[0].name == "run_shell"
 
 
-def test_register_adapter_conflicting_prefix_raises(monkeypatch):
-    import rein.adapters as adapters_mod
-
-    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
-
+def test_register_adapter_conflicting_prefix_raises():
     register_adapter("vllm", _ThirdPartyAdapter())
 
     with pytest.raises(ValueError, match="vllm"):
         register_adapter("vllm", _ThirdPartyAdapter())  # 다른 객체 — 충돌
 
 
-def test_register_adapter_same_object_is_idempotent(monkeypatch):
+def test_register_adapter_same_object_is_idempotent():
     import rein.adapters as adapters_mod
-
-    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
 
     adapter = _ThirdPartyAdapter()
     register_adapter("vllm", adapter)
@@ -489,11 +475,34 @@ def test_register_adapter_same_object_is_idempotent(monkeypatch):
     assert adapters_mod._ADAPTER_REGISTRY["vllm"] is adapter
 
 
-def test_register_adapter_cannot_hijack_builtin_prefix(monkeypatch):
+def test_register_adapter_cannot_hijack_builtin_prefix():
     """openai/anthropic는 이미 레지스트리에 있으므로 재등록 시도는 충돌로 취급."""
-    import rein.adapters as adapters_mod
-
-    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
-
     with pytest.raises(ValueError, match="openai"):
         register_adapter("openai", _ThirdPartyAdapter())
+
+
+def test_register_adapter_rejects_object_without_extract_tool_calls():
+    """리뷰 finding 1 (#80): adapter가 extract_tool_calls를 구현하지
+    않으면 등록 시점에 즉시 TypeError — §3 fail-closed. 이 검증이 없으면
+    실패가 한참 뒤 _observe 안에서 AttributeError로만 드러나(fail-open
+    관측 표면 특성상 그마저도 삼켜져) 조용한 무관측(§5 금지 패턴)이
+    된다."""
+    with pytest.raises(TypeError, match="extract_tool_calls"):
+        register_adapter("vllm", object())
+
+
+def test_register_adapter_rejects_dotted_module_prefix():
+    """리뷰 finding 2 (#80): module_prefix 매칭은
+    `type(client).__module__.split(".")[0]` 최상위 토큰 하나만 본다.
+    "vllm.entrypoints"처럼 점이 포함된 값을 그대로 받아주면 등록은
+    성공하지만 어떤 클라이언트와도 영영 매칭되지 않아 조용히
+    무관측으로 빠진다."""
+    with pytest.raises(ValueError, match="module_prefix"):
+        register_adapter("vllm.entrypoints", _ThirdPartyAdapter())
+
+
+def test_register_adapter_rejects_empty_module_prefix():
+    """빈 문자열 module_prefix는 `type(client).__module__`이 falsy인
+    임의 클라이언트에 우연히 매칭될 수 있어 거부한다."""
+    with pytest.raises(ValueError, match="module_prefix"):
+        register_adapter("", _ThirdPartyAdapter())

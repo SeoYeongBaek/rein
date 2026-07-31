@@ -69,7 +69,25 @@ def register_adapter(module_prefix: str, adapter: ModelAdapter) -> None:
     (fail-closed) — 두 서드파티 패키지의 충돌을 조용히 덮어쓰지 않는다.
     동일 객체(identity)의 재등록(모듈 재import 등)은 idempotent하게
     허용한다.
+
+    등록 시점에 두 가지를 fail-closed로 검증한다(리뷰 finding 1/2,
+    #80): module_prefix는 점(.)이 없는 최상위 모듈명 한 토큰이어야
+    하고(그렇지 않으면 매칭 로직이 `__module__.split(".")[0]`만 보므로
+    영영 매칭되지 않는 죽은 등록이 된다), adapter는 호출 가능한
+    extract_tool_calls를 구현해야 한다(그렇지 않으면 실패가 한참 뒤
+    fail-open인 _observe 안에서야 조용히 드러난다). 둘 다 위반 시
+    즉시 예외 — §5 stage_order 검증과 같은 fail-closed 패턴.
     """
+    if not isinstance(module_prefix, str) or not module_prefix or "." in module_prefix:
+        raise ValueError(
+            "register_adapter: module_prefix는 최상위 모듈명 한 토큰이어야 합니다 "
+            f'(예: "vllm"). 받은 값: {module_prefix!r}'
+        )
+    if not has_extract_tool_calls(adapter):
+        raise TypeError(
+            f"register_adapter: adapter {adapter!r}는 호출 가능한 "
+            "extract_tool_calls(response) 메서드를 구현해야 합니다 (ModelAdapter 계약)."
+        )
     existing = _ADAPTER_REGISTRY.get(module_prefix)
     if existing is not None and existing is not adapter:
         raise ValueError(

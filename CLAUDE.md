@@ -110,8 +110,8 @@ ModelAdapter) -> None`으로 자기 프로바이더 prefix를 등록하면, 사�
 # 서드파티 패키지 내부
 from rein.adapters import register_adapter, ModelAdapter
 
-class VLLMAdapter(ModelAdapter):
-    def extract_tool_calls(self, response): ...
+class VLLMAdapter:  # 상속 불필요 — 구조적 만족(Protocol)
+    def extract_tool_calls(self, response) -> list[ToolUse]: ...
 
 register_adapter("vllm", VLLMAdapter())
 ```
