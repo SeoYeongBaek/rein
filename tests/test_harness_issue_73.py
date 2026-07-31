@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rein.adapters import register_adapter
 from rein.harness import Harness
 
 # ---- 가짜 OpenAI SDK 모양 클라이언트 ----
@@ -239,3 +240,28 @@ def test_observe_failure_is_fail_open(harness, monkeypatch):
         result = client.chat.completions.create(model="gpt-4.1-nano", messages=[])
 
     assert result is response  # 관측이 터져도 원래 응답은 정상 반환
+
+
+def test_registered_third_party_adapter_not_auto_wired(harness, monkeypatch):
+    """#80: register_adapter로 등록된 서드파티는 인식되지만 자동
+    몽키패치 배선 대상이 아니다 — duck-typed 커스텀 클라이언트와
+    동일하게 _observed_client만 세팅된다."""
+    import rein.adapters as adapters_mod
+
+    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
+
+    class _VLLMAdapter:
+        def extract_tool_calls(self, response):
+            return []
+
+    class _FakeVLLMClient:
+        pass
+
+    _FakeVLLMClient.__module__ = "vllm.entrypoints"
+    register_adapter("vllm", _VLLMAdapter())
+
+    client = _FakeVLLMClient()
+    harness.observe_model(client)
+
+    assert harness._observed_client is client
+    assert harness._patch_state is None
