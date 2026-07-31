@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from rein.adapters import ToolUse, extract_tool_calls_for, is_recognized_adapter
+from rein.adapters import (
+    ModelAdapter,
+    ToolUse,
+    extract_tool_calls_for,
+    is_recognized_adapter,
+    register_adapter,
+)
 from rein.adapters.builtin import is_builtin_model_client
 from rein.adapters.protocol import has_extract_tool_calls
 from rein.adapters.providers.anthropic import AnthropicAdapter
@@ -268,27 +274,22 @@ def test_local_skeleton_returns_empty():
 # ---- 공개 확장 플러그인 경로 미노출 ----
 
 
-def test_no_public_plugin_registration_api():
-    """§12 M4 이연: 서드파티 어댑터 등록용 공개 API가 아직 없어야 한다.
+def test_public_plugin_registration_api_exposed():
+    """#80: 서드파티 어댑터 등록용 공개 API가 이제 존재해야 한다.
 
-    rein.adapters 공개 표면은 ToolUse + is_recognized_adapter만.
-    register_adapter 류의 공개 플러그인 진입점은 §4 '이후 시그니처를
-    바꾸지 않는다' 보존을 위해 지금 열지 않는다.
+    rein.adapters 공개 표면은 ToolUse/ModelAdapter/is_recognized_adapter/
+    extract_tool_calls_for/register_adapter 5개.
     """
     import rein.adapters as adapters_mod
 
-    public_names = {n for n in dir(adapters_mod) if not n.startswith("_")}
-    # __all__에 명시된 것만 공개.
-    # __all__에 명시된 것만 공개. (라우터 함수 추가 반영)
     assert set(adapters_mod.__all__) == {
         "ToolUse",
+        "ModelAdapter",
         "is_recognized_adapter",
         "extract_tool_calls_for",
+        "register_adapter",
     }
-    # register_*, plugin 같은 이름이 새지 않았는지.
-    assert not any(
-        name.startswith("register_") or "plugin" in name.lower() for name in public_names
-    )
+    assert callable(adapters_mod.register_adapter)
 
 
 # ---- extract_tool_calls_for 위임 헬퍼 ----
@@ -401,14 +402,98 @@ def test_extract_tool_calls_for_uses_singleton_adapters():
 
 
 def test_internal_classes_not_in_public_all():
-    """__all__은 3개만 — providers/* 내부 클래스는 직접 노출 금지."""
+    """__all__은 5개만 — providers/* 내부 클래스는 직접 노출 금지."""
     import rein.adapters as adapters_mod
 
     assert set(adapters_mod.__all__) == {
         "ToolUse",
+        "ModelAdapter",
         "is_recognized_adapter",
         "extract_tool_calls_for",
+        "register_adapter",
     }
     # OpenAIAdapter / AnthropicAdapter는 __all__에 없음.
     assert "OpenAIAdapter" not in adapters_mod.__all__
     assert "AnthropicAdapter" not in adapters_mod.__all__
+
+
+# ---- register_adapter: 서드파티 등록 (#80) ----
+
+
+class _ThirdPartyAdapter:
+    def __init__(self, tool_name: str = "third_party_tool"):
+        self._tool_name = tool_name
+
+    def extract_tool_calls(self, response):
+        return [ToolUse(name=self._tool_name, args={})]
+
+
+def test_model_adapter_protocol_is_structural():
+    """ModelAdapter는 명시적 상속 없이도 구조적으로 만족되는 Protocol이어야 한다."""
+    assert isinstance(_ThirdPartyAdapter(), ModelAdapter)
+
+
+def test_register_adapter_makes_prefix_recognized(monkeypatch):
+    import rein.adapters as adapters_mod
+
+    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
+
+    class _FakeVLLMClient:
+        pass
+
+    _patch_module(_FakeVLLMClient, "vllm.entrypoints")
+
+    adapter = _ThirdPartyAdapter()
+    register_adapter("vllm", adapter)
+
+    assert is_recognized_adapter(_FakeVLLMClient()) is True
+
+
+def test_register_adapter_routes_extract_tool_calls_for(monkeypatch):
+    import rein.adapters as adapters_mod
+
+    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
+
+    class _FakeVLLMClient:
+        pass
+
+    _patch_module(_FakeVLLMClient, "vllm.entrypoints")
+
+    register_adapter("vllm", _ThirdPartyAdapter(tool_name="run_shell"))
+
+    out = extract_tool_calls_for(_FakeVLLMClient(), response=None)
+    assert len(out) == 1
+    assert out[0].name == "run_shell"
+
+
+def test_register_adapter_conflicting_prefix_raises(monkeypatch):
+    import rein.adapters as adapters_mod
+
+    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
+
+    register_adapter("vllm", _ThirdPartyAdapter())
+
+    with pytest.raises(ValueError, match="vllm"):
+        register_adapter("vllm", _ThirdPartyAdapter())  # 다른 객체 — 충돌
+
+
+def test_register_adapter_same_object_is_idempotent(monkeypatch):
+    import rein.adapters as adapters_mod
+
+    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
+
+    adapter = _ThirdPartyAdapter()
+    register_adapter("vllm", adapter)
+    register_adapter("vllm", adapter)  # 동일 객체 재등록 — 에러 없음
+
+    assert adapters_mod._ADAPTER_REGISTRY["vllm"] is adapter
+
+
+def test_register_adapter_cannot_hijack_builtin_prefix(monkeypatch):
+    """openai/anthropic는 이미 레지스트리에 있으므로 재등록 시도는 충돌로 취급."""
+    import rein.adapters as adapters_mod
+
+    monkeypatch.setattr(adapters_mod, "_ADAPTER_REGISTRY", dict(adapters_mod._ADAPTER_REGISTRY))
+
+    with pytest.raises(ValueError, match="openai"):
+        register_adapter("openai", _ThirdPartyAdapter())
