@@ -829,7 +829,7 @@ if inspect.iscoroutinefunction(func):
 기록은 전부 동기 코드라 이벤트 루프를 양보하지 않는다 — seq 부여
 순서가 항상 호출 순서와 일치한다. `asyncio.gather` 등으로 두 번째
 호출이 락이 잡힌 상태에서 들어오면 조용히 대기시키지 않고 즉시
-`ConcurrentToolCallError`를 던져 거부한다(§5/§9의 "조용한 무시 금지"
+`ConcurrentToolCallError`를 던져 거부한다(§5의 "조용한 무시 금지"
 원칙과 동일한 이유 — 사용자가 의도치 않게 성능만 잃고 아무 신호를
 못 받는 상태를 막는다).
 
