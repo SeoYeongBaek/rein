@@ -113,3 +113,78 @@ def test_async_concurrent_gather_rejected(tmp_path):
     errors = [r for r in results if isinstance(r, ConcurrentToolCallError)]
     assert len(successes) == 1
     assert len(errors) == 1
+
+
+def test_async_sequential_seq_matches_call_order(tmp_path):
+    """두 async 도구를 순서대로 await하면 seq가 호출 순서(0,1)와 일치하는지 확인"""
+    log_path = tmp_path / "run.jsonl"
+    h = Harness(record=log_path)
+
+    @h.register_tool
+    async def echo(x: int) -> int:
+        return x
+
+    async def run():
+        await echo(1)
+        await echo(2)
+
+    asyncio.run(run())
+    h._event_store.close()
+
+    lines = [json.loads(line) for line in log_path.read_text().splitlines()]
+    tool_wraps = [line for line in lines if line["source"] == "tool_wrap"]
+    assert [tw["seq"] for tw in tool_wraps] == [0, 1]
+    assert [tw["args"]["x"] for tw in tool_wraps] == [1, 2]
+
+
+def test_mixed_sync_async_tools_ordering(tmp_path):
+    """한 Harness에 sync/async 도구를 섞어 등록해도 순차 호출 시 seq 순서가 정상인지 확인"""
+    log_path = tmp_path / "run.jsonl"
+    h = Harness(record=log_path)
+
+    @h.register_tool
+    def sync_tool(x: int) -> int:
+        return x
+
+    @h.register_tool
+    async def async_tool(x: int) -> int:
+        return x
+
+    async def run():
+        sync_tool(1)
+        await async_tool(2)
+        sync_tool(3)
+
+    asyncio.run(run())
+    h._event_store.close()
+
+    lines = [json.loads(line) for line in log_path.read_text().splitlines()]
+    tool_wraps = [line for line in lines if line["source"] == "tool_wrap"]
+    assert [tw["seq"] for tw in tool_wraps] == [0, 1, 2]
+    assert [tw["args"]["x"] for tw in tool_wraps] == [1, 2, 3]
+
+
+def test_async_replay_verify_roundtrip(tmp_path):
+    """async Harness로 기록한 run.jsonl을 기존 ReplayEngine(무변경)으로 그대로 재생"""
+    from rein.replay.engine import ReplayEngine
+
+    log_path = tmp_path / "run.jsonl"
+    h = Harness(record=log_path)
+
+    @h.register_tool
+    async def fetch(url: str) -> str:
+        return f"fetched:{url}"
+
+    async def run():
+        await fetch("https://a.example")
+        await fetch("https://b.example")
+
+    asyncio.run(run())
+    h._event_store.close()
+
+    engine = ReplayEngine(log_path, mode="replay-verify")
+    assert len(engine) == 2
+    first = engine.match("fetch", {"url": "https://a.example"})
+    assert first["seq"] == 0
+    second = engine.match("fetch", {"url": "https://b.example"})
+    assert second["seq"] == 1
