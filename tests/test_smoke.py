@@ -23,9 +23,10 @@ def test_register_tool_accepts_async():
     h = Harness(record="dummy.jsonl")
 
     @h.register_tool
-    async def async_tool(): ...
+    async def async_tool():
+        return 42
 
-    asyncio.run(async_tool())
+    assert asyncio.run(async_tool()) == 42
 
 
 def test_observe_model_fails_closed_on_unrecognized_client():
@@ -40,6 +41,15 @@ def test_guardrail_exception_hierarchy():
         err = exc_cls("deny", "rule_0001", "테스트 사유", "evt_0001")
         assert err.rule_id == "rule_0001"
         assert err.rationale == "테스트 사유"
+
+
+def test_concurrent_tool_call_error_importable_from_package_root():
+    """최종 리뷰 Important #1: ConcurrentToolCallError도 다른 예외들처럼
+    패키지 루트에서 바로 import 가능해야 한다."""
+    import rein.harness
+
+    assert rein.ConcurrentToolCallError is rein.harness.ConcurrentToolCallError
+    assert issubclass(rein.ConcurrentToolCallError, RuntimeError)
 
 
 def test_default_stage_order_used_without_config(tmp_path):

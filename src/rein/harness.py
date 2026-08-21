@@ -24,7 +24,7 @@ import asyncio
 import functools
 import inspect
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -185,7 +185,7 @@ class Harness:
         # M4 #78: 순차 async 지원. 락 구간 안에서 정확히 하나의 tool_wrap만
         # 진행되도록 강제해 §6 위치 기반 매칭을 sync와 동일하게 보존한다.
         # Python 3.11+에서는 실행 중인 이벤트 루프 없이 생성해도 안전하다.
-        self._async_lock = asyncio.Lock()
+        self._async_lock: asyncio.Lock = asyncio.Lock()
         self._in_flight_tool: str | None = None
 
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
@@ -252,6 +252,7 @@ class Harness:
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                # [이슈 #65] §5/§9 분리. 두 객체는 서로 다른 dict다(sync wrapper와 동일).
                 stage_ctx = self._session_state
                 log_ctx = _snapshot_context_for_log(self._context)
                 bound = _bound_args(args, kwargs)
@@ -417,6 +418,13 @@ class Harness:
         try:
             result = do_call()
         except Exception as exc:
+            # §7 분류 테이블(SQL featurize 등)은 M2 스코프. 다운스트림
+            # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고 항상
+            # featurize로 재계산하므로, 여기서는 의식적으로 선택한 고정값
+            # (warning)만 채운다 — 예외 종류와 무관한 고정 warning
+            # 기본값이 §7 표를 어기는 별개 결함이라는 점은 CLAUDE.md §31에
+            # 이미 문서화되어 있다(조용한 기본값이 아니라 의도적 선택임을
+            # 명시).
             self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
             raise
         else:
@@ -426,7 +434,7 @@ class Harness:
     async def _intercept_async(
         self,
         tool_call: dict[str, Any],
-        do_call: Callable[[], Any],
+        do_call: Callable[[], Awaitable[Any]],
         stage_ctx: dict[str, Any] | None,
         log_ctx: dict[str, Any] | None,
     ) -> Any:
@@ -437,7 +445,10 @@ class Harness:
         락 획득부터 해제까지 구간에서 `await`는 `await do_call()` 한
         곳뿐이라, "검사 시작 → seq 부여 → 실행 → outcome 기록"이
         원자적 단위가 되고 seq 부여 순서가 항상 호출 순서와 일치한다
-        (sync 모드와 동일한 §6 보장).
+        (sync 모드와 동일한 §6 보장). 같은 이유로 등록된 async 도구가
+        내부에서 또 다른 등록된 async 도구를 await하는 중첩(재진입)
+        호출도 지원하지 않는다 — sync 경로(`_intercept`)는 중첩 호출이
+        문제없이 동작하는 것과 대비되는 의도된 비대칭이다.
 
         Args:
             tool_call: {"name": str, "args": dict} 형태의 호출 정보.
@@ -454,8 +465,12 @@ class Harness:
             raise ConcurrentToolCallError(
                 f"'{tool_call['name']}' 호출이 이미 진행 중인 "
                 f"'{self._in_flight_tool}' 호출과 겹쳤습니다. rein은 순차 "
-                "async만 지원합니다 — asyncio.gather로 등록된 도구를 묶지 "
-                "말고 하나씩 await 하세요."
+                "async만 지원합니다. 원인은 둘 중 하나입니다 — ① "
+                "asyncio.gather 등으로 등록된 도구 여러 개를 실제 동시에 "
+                "호출했거나, ② 등록된 async 도구 안에서 또 다른 등록된 "
+                "async 도구를 await(중첩/재진입)했습니다. ①은 도구 호출을 "
+                "묶지 말고 하나씩 await 하세요. ②는 sync 경로와 달리 "
+                "async는 중첩 호출을 지원하지 않습니다(의도된 제약)."
             )
         async with self._async_lock:
             self._in_flight_tool = tool_call["name"]
@@ -464,6 +479,13 @@ class Harness:
                 try:
                     result = await do_call()
                 except Exception as exc:
+                    # §7 분류 테이블(SQL featurize 등)은 M2 스코프. 다운스트림
+                    # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고
+                    # 항상 featurize로 재계산하므로, 여기서는 _intercept와
+                    # 동일하게 의식적으로 선택한 고정값(warning)만 채운다 —
+                    # 예외 종류와 무관한 고정 warning 기본값이 §7 표를
+                    # 어기는 별개 결함이라는 점은 CLAUDE.md §31에 이미
+                    # 문서화되어 있다(조용한 기본값이 아니라 의도적 선택).
                     self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
                     raise
                 else:

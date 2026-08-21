@@ -274,7 +274,10 @@ class ApprovalRequired(GuardrailVerdictError): ...
 호출이 락이 잡힌 상태에서 들어오면 조용히 대기시키지 않고 즉시
 `ConcurrentToolCallError`를 던져 거부한다(§5의 "조용한 무시 금지"
 원칙과 동일한 이유 — 사용자가 의도치 않게 성능만 잃고 아무 신호를
-못 받는 상태를 막는다).
+못 받는 상태를 막는다). 같은 에러는 등록된 async 도구가 내부에서 또
+다른 등록된 async 도구를 await하는 중첩(재진입) 호출에서도 발생한다
+— sync 경로는 중첩 호출을 문제없이 지원하는 것과 다른, async 한정의
+의도된 단순화다.
 
 이 설계 덕분에 `ReplayEngine`/`EventStore`/§9 이벤트 스키마는 무변경
 그대로다 — "seq 부여 순서 = 호출 순서"라는 sync 모드의 불변식이
