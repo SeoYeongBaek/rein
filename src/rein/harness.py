@@ -20,6 +20,7 @@ mutate해도 그 mutate된 상태가 이번 호출의 tool_wrap 로그 줄에
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import warnings
@@ -71,6 +72,15 @@ def _enforce(verdict: Verdict, rule_id: str, rationale: str, evt_id: str) -> Non
         return
     exc_cls = _VERDICT_TO_EXCEPTION[verdict]
     raise exc_cls(str(verdict), rule_id, rationale, evt_id)
+
+
+class ConcurrentToolCallError(RuntimeError):
+    """asyncio.gather 등으로 등록된 도구를 실제 동시에 호출하면 발생한다(M4 #78).
+
+    rein은 순차 async만 지원한다 — §6 위치 기반 리플레이 매칭이 "seq 부여
+    순서 = 호출 순서"라는 불변식에 의존하기 때문에, 진짜 병렬 실행은
+    조용히 직렬화하지 않고 fail-closed로 거부한다.
+    """
 
 
 def _snapshot_context_for_log(ctx: Any) -> dict[str, Any]:
@@ -171,6 +181,12 @@ class Harness:
         self._replay_engine: ReplayEngine | None = None
         if mode == "live-rerun":
             self._replay_engine = ReplayEngine(self.replay_from, mode="live-rerun")
+
+        # M4 #78: 순차 async 지원. 락 구간 안에서 정확히 하나의 tool_wrap만
+        # 진행되도록 강제해 §6 위치 기반 매칭을 sync와 동일하게 보존한다.
+        # Python 3.11+에서는 실행 중인 이벤트 루프 없이 생성해도 안전하다.
+        self._async_lock = asyncio.Lock()
+        self._in_flight_tool: str | None = None
 
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
         self._stage_order: list[str] = load_stage_order(config)
