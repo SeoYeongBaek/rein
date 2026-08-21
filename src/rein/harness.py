@@ -318,6 +318,52 @@ class Harness:
         setattr(owner, attr_name, _wrapped)
         self._patch_state = (owner, attr_name, original)
 
+    def _run_guardrail_stages(
+        self,
+        tool_call: dict[str, Any],
+        stage_ctx: dict[str, Any] | None,
+        log_ctx: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """검사 + tool_wrap 기록 + live-rerun 위치 매칭 (sync/async 공유, M4 #78).
+
+        `_intercept`(sync)와 `_intercept_async`가 공통으로 쓰는 부분만
+        추출한 것 — do_call() 실행과 outcome 기록은 호출자가 각자
+        담당한다(sync는 즉시 호출, async는 await).
+
+        non-allow 판정은 tool_wrap을 기록한 뒤 예외로 환원해 던진다
+        (§4 비-silent 차단, §5 fail-closed). 통과하면 tool_wrap이 기록된
+        event dict를 반환한다.
+        """
+        pipeline = self._sealed_pipeline()  # _activate() 완료 후에만 유효.
+
+        # ① 검사: 첫 non-allow 승리(§5). stage_ctx가 stage에 직접 전달.
+        for _stage_name, stage_fn in pipeline:
+            verdict, rule_id, rationale, _stage_evt_id = stage_fn(tool_call, stage_ctx)
+            if verdict != Verdict.ALLOW:
+                # non-allow도 §9 그대로 tool_wrap 한 줄로 남긴다. 실행이
+                # 없었으므로 outcome 줄은 만들지 않는다.
+                event = self._event_store.record_tool_wrap(
+                    tool_name=tool_call["name"],
+                    args=tool_call.get("args", {}),
+                    context=log_ctx,
+                    verdict=str(verdict),
+                )
+                # _enforce는 verdict != ALLOW일 때 항상 예외를 던진다.
+                _enforce(verdict, rule_id, rationale, evt_id=event["evt"])
+
+        # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
+        #    녹화된 시퀀스의 같은 자리인지 확인한다(§6 인자 매칭 규칙).
+        if self._replay_engine is not None:
+            self._replay_engine.match(tool_call["name"], tool_call.get("args", {}))
+
+        # ③ 통과한 경우에만 기록. §6 매칭 키 seq는 EventStore 내부에서 부여.
+        return self._event_store.record_tool_wrap(
+            tool_name=tool_call["name"],
+            args=tool_call.get("args", {}),
+            context=log_ctx,
+            verdict="allow",
+        )
+
     def _intercept(
         self,
         tool_call: dict[str, Any],
@@ -325,23 +371,11 @@ class Harness:
         stage_ctx: dict[str, Any] | None,
         log_ctx: dict[str, Any] | None,
     ) -> Any:
-        """집행 표면(§3 표, 권장, 강제 집행 경로).
+        """집행 표면(§3 표, 권장, 강제 집행 경로) — 동기 도구 전용.
 
-        도구 실행 직전에 가드레일 파이프라인을 돌리고, 첫 non-allow에서
-        즉시 예외를 던진다(§5 short-circuit, §4 비-silent 차단). 통과한
-        경우에만 do_call을 실행한다 — 이 한 자리가 "집행 여부" 결정의
-        유일한 지점이며, _observe와 책임이 겹치지 않는다(§3 표면 분리).
-
-        mode="live-rerun"이면 실제 함수 호출 직전에 ReplayEngine.match()로
-        녹화 시퀀스와의 위치 매칭을 검증한다(§6). 매칭 실패는
-        ReplayMismatchError로 그대로 전파된다 — 가드레일이 이전 실행과
-        다른 지점에서 개입하면 그 이후 위치 매칭이 깨지는 것 자체가
-        §6 "정직한 한계"의 관측 결과이므로 여기서 흡수하지 않는다.
-
-        [이슈 #65] 인자 분리: stage_ctx(§5 세션 누적 상태, 가변)와
-        log_ctx(§9 정적 메타데이터, 호출 시점 얕은 복사)를 별개로
-        받는다. stage_ctx는 stage 함수에, log_ctx는 record_tool_wrap에
-        각각 전달되어 stage의 mutation이 이번 호출 로그에 새지 않는다.
+        검사·기록은 `_run_guardrail_stages`에 위임하고, 여기서는 실제
+        도구 호출(동기)과 outcome 기록만 담당한다. mode="live-rerun"
+        위치 매칭도 `_run_guardrail_stages` 안에서 수행된다(§6).
 
         Args:
             tool_call: {"name": str, "args": dict} 형태의 호출 정보.
@@ -353,51 +387,10 @@ class Harness:
             Denied | RetryRequested | ApprovalRequired: 첫 non-allow 판정.
             ReplayMismatchError: live-rerun 위치 매칭 실패.
         """
-        pipeline = self._sealed_pipeline()  # _activate() 완료 후에만 유효.
-
-        # ① 검사: 첫 non-allow 승리(§5). stage_ctx가 stage에 직접 전달.
-        for _stage_name, stage_fn in pipeline:
-            verdict, rule_id, rationale, _stage_evt_id = stage_fn(tool_call, stage_ctx)
-            if verdict != Verdict.ALLOW:
-                # [버그 픽스 B] non-allow도 §9 그대로 tool_wrap 한 줄로
-                # 남긴다. 실행이 없었으므로 outcome 줄은 만들지 않는다
-                # (§9 생애주기 비대칭 — outcome이 없을 수 있다는 것과
-                # 일관됨). evt_id는 스테이지가 반환한 placeholder 대신
-                # 방금 기록된 진짜 evt를 쓴다 — 스테이지는 실제 evt id를
-                # 미리 알 수 없다(부여는 EventStore의 책임).
-                event = self._event_store.record_tool_wrap(
-                    tool_name=tool_call["name"],
-                    args=tool_call.get("args", {}),
-                    context=log_ctx,
-                    verdict=str(verdict),
-                )
-                # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
-                _enforce(verdict, rule_id, rationale, evt_id=event["evt"])
-                return  # type: ignore[unreachable]
-
-        # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
-        #    녹화된 시퀀스의 같은 자리인지 확인한다(§6 인자 매칭 규칙).
-        if self._replay_engine is not None:
-            self._replay_engine.match(tool_call["name"], tool_call.get("args", {}))
-
-        # ③ 집행: 통과한 경우에만 기록 + 실행.
-        #    [이슈 #65] log_ctx는 호출 시점 얕은 복사본 — stage가
-        #    stage_ctx를 mutate해도 이번 로그 줄에 영향 없음.
-        #    §6 매칭 키 seq는 EventStore.record_tool_wrap 내부에서 부여한다.
-        event = self._event_store.record_tool_wrap(
-            tool_name=tool_call["name"],
-            args=tool_call.get("args", {}),
-            context=log_ctx,
-            verdict="allow",
-        )
+        event = self._run_guardrail_stages(tool_call, stage_ctx, log_ctx)
         try:
             result = do_call()
         except Exception as exc:
-            # §7 분류 테이블(SQL featurize 등)은 M2 스코프. 다운스트림
-            # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고
-            # 항상 featurize로 재계산하므로, M1은 의식적으로 선택한
-            # 고정값(warning)만 채운다(§37 — 조용한 기본값 금지는
-            # EventStore API 쪽 계약이지 호출자의 판단까지 금지하지 않음).
             self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
             raise
         else:
