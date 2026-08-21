@@ -217,9 +217,14 @@ class Harness:
         self._sealed = True
 
     def register_tool(self, func: F) -> F:
-        """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다."""
-        if inspect.iscoroutinefunction(func):
-            raise TypeError("M1은 동기 함수만 지원합니다")
+        """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다.
+
+        M4 #78: async def도 지원한다 — 단, 순차 실행만(한 번에 하나씩
+        await). asyncio.gather 등으로 실제 동시 호출되면
+        ConcurrentToolCallError로 거부된다(상세 근거는
+        docs/superpowers/specs/2026-08-21-async-tool-support-design.md).
+        """
+        is_async = inspect.iscoroutinefunction(func)
 
         # 도구가 실행되기 전 가장 이른 시점에 파이프라인 봉인(seal) 및 확정
         self._activate()
@@ -243,18 +248,23 @@ class Harness:
                 # _intercept는 정상 호출을 모델링하므로 여기선 합치기만 시도
                 return dict(kwargs)
 
+        if is_async:
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                stage_ctx = self._session_state
+                log_ctx = _snapshot_context_for_log(self._context)
+                bound = _bound_args(args, kwargs)
+                tool_call = {"name": func.__name__, "args": bound}
+                return await self._intercept_async(
+                    tool_call, lambda: func(*args, **kwargs), stage_ctx, log_ctx
+                )
+
+            return async_wrapper  # type: ignore
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             # [이슈 #65] §5/§9 분리. 두 객체는 서로 다른 dict다.
-            # · stage_ctx: §5 세션 누적 상태. __init__에서 사용자
-            #   context의 얕은 복사로 seed됨. stage 함수가 agent_role
-            #   같은 정적 메타를 읽을 수 있고, 그 위에 counter·token
-            #   같은 동적 누적을 얹는다.
-            # · log_ctx: §9 정적 메타데이터. self._context의 호출 시점
-            #   얕은 복사본. stage_ctx의 mutation이 log로 새지 않도록
-            #   wrapper에서 미리 스냅샷.
-            # 분리하지 않으면 stage의 session mutation이 이번 호출의
-            # tool_wrap 로그 줄에 그대로 새어 들어간다 (이슈 #64 #65 배경).
             stage_ctx = self._session_state
             log_ctx = _snapshot_context_for_log(self._context)
 
@@ -412,6 +422,55 @@ class Harness:
         else:
             self._event_store.record_ok(event)
             return result
+
+    async def _intercept_async(
+        self,
+        tool_call: dict[str, Any],
+        do_call: Callable[[], Any],
+        stage_ctx: dict[str, Any] | None,
+        log_ctx: dict[str, Any] | None,
+    ) -> Any:
+        """집행 표면의 async 버전(M4 #78) — 순차 async 전용.
+
+        `asyncio.gather` 등으로 실제 동시 호출되면 즉시
+        `ConcurrentToolCallError`를 던져 거부한다(조용한 직렬화 금지).
+        락 획득부터 해제까지 구간에서 `await`는 `await do_call()` 한
+        곳뿐이라, "검사 시작 → seq 부여 → 실행 → outcome 기록"이
+        원자적 단위가 되고 seq 부여 순서가 항상 호출 순서와 일치한다
+        (sync 모드와 동일한 §6 보장).
+
+        Args:
+            tool_call: {"name": str, "args": dict} 형태의 호출 정보.
+            do_call: 실제 도구 코루틴을 반환하는 no-arg callable.
+            stage_ctx: §5 세션 누적 상태.
+            log_ctx: §9 정적 메타데이터.
+
+        Raises:
+            ConcurrentToolCallError: 다른 async 도구 호출이 이미 진행 중.
+            Denied | RetryRequested | ApprovalRequired: 첫 non-allow 판정.
+            ReplayMismatchError: live-rerun 위치 매칭 실패.
+        """
+        if self._async_lock.locked():
+            raise ConcurrentToolCallError(
+                f"'{tool_call['name']}' 호출이 이미 진행 중인 "
+                f"'{self._in_flight_tool}' 호출과 겹쳤습니다. rein은 순차 "
+                "async만 지원합니다 — asyncio.gather로 등록된 도구를 묶지 "
+                "말고 하나씩 await 하세요."
+            )
+        async with self._async_lock:
+            self._in_flight_tool = tool_call["name"]
+            try:
+                event = self._run_guardrail_stages(tool_call, stage_ctx, log_ctx)
+                try:
+                    result = await do_call()
+                except Exception as exc:
+                    self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
+                    raise
+                else:
+                    self._event_store.record_ok(event)
+                    return result
+            finally:
+                self._in_flight_tool = None
 
     def _observe(self, response_or_event: Any) -> None:
         """관측 표면(§3 표, 옵트인, default-off).
