@@ -37,3 +37,79 @@ def test_async_tool_basic_call(tmp_path):
     assert lines[0]["verdict"] == "allow"
     assert lines[1]["source"] == "outcome"
     assert lines[1]["outcome"]["status"] == "ok"
+
+
+def test_async_tool_exception_records_error(tmp_path):
+    """도구가 예외를 던지면 outcome error가 기록되고 예외가 그대로 전파되는지 확인"""
+    import pytest
+
+    log_path = tmp_path / "run.jsonl"
+    h = Harness(record=log_path)
+
+    @h.register_tool
+    async def boom():
+        raise ValueError("망함")
+
+    async def run():
+        with pytest.raises(ValueError, match="망함"):
+            await boom()
+
+    asyncio.run(run())
+
+    h._event_store.close()
+    lines = [json.loads(line) for line in log_path.read_text().splitlines()]
+    outcome = lines[1]
+    assert outcome["source"] == "outcome"
+    assert outcome["outcome"]["status"] == "error"
+    assert outcome["outcome"]["severity"] == "warning"
+
+
+def test_async_tool_denied_releases_lock(tmp_path):
+    """deny된 async 호출 후에도 락이 정상 해제돼 다음 호출이 막히지 않는지 확인"""
+    import pytest
+
+    from rein.guardrails.exceptions import Denied
+    from rein.guardrails.verdict import Verdict
+
+    h = Harness(record=tmp_path / "run.jsonl")
+
+    def deny_stage(tool_call, ctx):
+        return Verdict.DENY, "rule_block", "차단", "evt_x"
+
+    h.register_stage("budget", deny_stage)
+
+    @h.register_tool
+    async def blocked_tool():
+        return "실행되면 안 됨"
+
+    async def run():
+        with pytest.raises(Denied):
+            await blocked_tool()
+        # 락이 정상 해제됐다면 두 번째 호출도 (ConcurrentToolCallError 없이)
+        # 똑같이 Denied를 던져야 한다.
+        with pytest.raises(Denied):
+            await blocked_tool()
+
+    asyncio.run(run())
+    assert h._in_flight_tool is None
+
+
+def test_async_concurrent_gather_rejected(tmp_path):
+    """asyncio.gather로 실제 동시 호출하면 하나는 성공, 하나는 ConcurrentToolCallError"""
+    from rein.harness import ConcurrentToolCallError
+
+    h = Harness(record=tmp_path / "run.jsonl")
+
+    @h.register_tool
+    async def slow_tool():
+        await asyncio.sleep(0.05)
+        return "done"
+
+    async def run():
+        return await asyncio.gather(slow_tool(), slow_tool(), return_exceptions=True)
+
+    results = asyncio.run(run())
+    successes = [r for r in results if r == "done"]
+    errors = [r for r in results if isinstance(r, ConcurrentToolCallError)]
+    assert len(successes) == 1
+    assert len(errors) == 1
