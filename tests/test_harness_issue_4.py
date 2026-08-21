@@ -41,13 +41,16 @@ def test_register_tool_success_and_seal(harness):
     assert add(2, 3) == 5  # 정상 실행 여부
 
 
-def test_register_tool_rejects_async(harness):
-    """비동기(async) 함수 등록 시 명세대로 TypeError를 뱉는지 확인"""
-    with pytest.raises(TypeError, match="M1은 동기 함수만 지원합니다"):
+def test_register_tool_accepts_async(harness):
+    """M4 #78: 비동기(async) 함수도 도구로 등록·실행할 수 있는지 확인"""
+    import asyncio
 
-        @harness.register_tool
-        async def async_tool():
-            pass
+    @harness.register_tool
+    async def async_add(a: int, b: int) -> int:
+        return a + b
+
+    result = asyncio.run(async_add(2, 3))
+    assert result == 5
 
 
 def test_register_stage_after_seal_fails(harness):

@@ -258,16 +258,39 @@ class ApprovalRequired(GuardrailVerdictError): ...
 구현하지 않고 동일하게 예외로 호출자에 위임한다. HITL 승인 UI나 재시도
 정책 엔진은 §10 "차별점은 규칙 합성 하나"와 §11 바벨 전략 위반이다.
 
-**M1 스코프 제약 — 동기 호출만 지원**: `register_tool`은 `async def`를
-거부한다.
-```python
-if inspect.iscoroutinefunction(func):
-    raise TypeError("M1은 동기 함수만 지원합니다")
-```
-동시 호출이 record와 replay-verify 사이에서 완료 순서가 달라지면 §6의
-위치 기반 매칭이 깨지기 때문에, "동시 호출을 감지해서 처리"하는 대신
-**애초에 등록을 막아 문제 자체를 스코프 아웃**한다. 비동기 지원은 M4
-이후 검토 대상이다.
+**비동기(async) 도구 지원 (M4, 이슈 #78 완료)**: `register_tool`은
+`inspect.iscoroutinefunction(func)`로 분기해 `async def` 도구도
+등록·실행한다. 단 **순차 async만 지원**한다 — 에이전트 루프가 매
+호출을 `await`로 하나씩 순서대로 처리하는 패턴만 대상이며, 도구의
+진짜 병렬 실행(`asyncio.gather`로 여러 등록 도구를 실제 동시에
+호출하는 것)은 지원하지 않는다.
+
+`Harness`는 인스턴스당 `asyncio.Lock`을 하나 갖고, 도구 하나의
+"검사 → seq 부여 → 실행 → outcome 기록" 구간 전체를 이 락으로
+묶는다. 락 보유 중 `await`가 걸리는 지점은 실제 도구 호출
+(`await do_call()`) 한 곳뿐이라 — 가드레일 스테이지 순회·이벤트
+기록은 전부 동기 코드라 이벤트 루프를 양보하지 않는다 — seq 부여
+순서가 항상 호출 순서와 일치한다. `asyncio.gather` 등으로 두 번째
+호출이 락이 잡힌 상태에서 들어오면 조용히 대기시키지 않고 즉시
+`ConcurrentToolCallError`를 던져 거부한다(§5의 "조용한 무시 금지"
+원칙과 동일한 이유 — 사용자가 의도치 않게 성능만 잃고 아무 신호를
+못 받는 상태를 막는다). 같은 에러는 등록된 async 도구가 내부에서 또
+다른 등록된 async 도구를 await하는 중첩(재진입) 호출에서도 발생한다
+— sync 경로는 중첩 호출을 문제없이 지원하는 것과 다른, async 한정의
+의도된 단순화다.
+
+이 설계 덕분에 `ReplayEngine`/`EventStore`/§9 이벤트 스키마는 무변경
+그대로다 — "seq 부여 순서 = 호출 순서"라는 sync 모드의 불변식이
+async에서도 100% 유지되기 때문에 §6 위치 기반 리플레이 매칭이 그대로
+적용된다. sync 도구 호출은 `await`가 없는 일반 함수 호출이라 그
+자체로 이벤트 루프를 블로킹하므로, 한 Harness에 sync/async 도구를
+섞어 등록해도 별도 조정 로직 없이 순서가 보장된다.
+
+`observe_model`의 비동기 모델 클라이언트(AsyncOpenAI/AsyncAnthropic)
+자동 배선과 `register_stage` 커스텀 가드레일 스테이지의 `async def`
+지원은 별개 이슈다(이번 스코프 아님). 설계 근거 전문은
+`docs/superpowers/specs/2026-08-21-async-tool-support-design.md`
+참고.
 
 ### CLI 명세
 
