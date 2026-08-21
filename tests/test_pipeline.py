@@ -19,15 +19,18 @@ def test_sync_tool_allow():
     assert result == 7
 
 
-def test_async_tool_blocked():
-    """M1 명세에 따라 비동기 함수 등록 시 즉시 TypeError를 던지는지 확인"""
+def test_async_tool_allowed():
+    """M4 #78: 비동기 함수 등록이 더 이상 TypeError 없이 정상 실행되는지 확인"""
+    import asyncio
+
     h = Harness(record="dummy.jsonl")
 
-    with pytest.raises(TypeError, match="M1은 동기 함수만 지원합니다"):
+    @h.register_tool
+    async def async_dummy(x, y):
+        return x + y
 
-        @h.register_tool
-        async def async_dummy():
-            pass
+    result = asyncio.run(async_dummy(3, 4))
+    assert result == 7
 
 
 # --- 2. Fail-closed (초기화 실패) 테스트 ---

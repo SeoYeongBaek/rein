@@ -17,12 +17,15 @@ def test_harness_is_context_manager():
     assert hasattr(rein.Harness, "__exit__")
 
 
-def test_register_tool_rejects_async():
-    h = Harness(record="dummy.jsonl")
-    with pytest.raises(TypeError, match="M1은 동기 함수만 지원합니다"):
+def test_register_tool_accepts_async():
+    import asyncio
 
-        @h.register_tool
-        async def async_tool(): ...
+    h = Harness(record="dummy.jsonl")
+
+    @h.register_tool
+    async def async_tool(): ...
+
+    asyncio.run(async_tool())
 
 
 def test_observe_model_fails_closed_on_unrecognized_client():
