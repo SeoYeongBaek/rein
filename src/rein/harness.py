@@ -20,10 +20,11 @@ mutate해도 그 mutate된 상태가 이번 호출의 tool_wrap 로그 줄에
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -71,6 +72,15 @@ def _enforce(verdict: Verdict, rule_id: str, rationale: str, evt_id: str) -> Non
         return
     exc_cls = _VERDICT_TO_EXCEPTION[verdict]
     raise exc_cls(str(verdict), rule_id, rationale, evt_id)
+
+
+class ConcurrentToolCallError(RuntimeError):
+    """asyncio.gather 등으로 등록된 도구를 실제 동시에 호출하면 발생한다(M4 #78).
+
+    rein은 순차 async만 지원한다 — §6 위치 기반 리플레이 매칭이 "seq 부여
+    순서 = 호출 순서"라는 불변식에 의존하기 때문에, 진짜 병렬 실행은
+    조용히 직렬화하지 않고 fail-closed로 거부한다.
+    """
 
 
 def _snapshot_context_for_log(ctx: Any) -> dict[str, Any]:
@@ -172,6 +182,12 @@ class Harness:
         if mode == "live-rerun":
             self._replay_engine = ReplayEngine(self.replay_from, mode="live-rerun")
 
+        # M4 #78: 순차 async 지원. 락 구간 안에서 정확히 하나의 tool_wrap만
+        # 진행되도록 강제해 §6 위치 기반 매칭을 sync와 동일하게 보존한다.
+        # Python 3.11+에서는 실행 중인 이벤트 루프 없이 생성해도 안전하다.
+        self._async_lock: asyncio.Lock = asyncio.Lock()
+        self._in_flight_tool: str | None = None
+
         # §5 fail-closed: 구조(YAML 파싱/타입) 검증은 생성 시점에 즉시 한다.
         self._stage_order: list[str] = load_stage_order(config)
         self._resolved_stage_order: list[str] | None = None
@@ -201,9 +217,14 @@ class Harness:
         self._sealed = True
 
     def register_tool(self, func: F) -> F:
-        """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다."""
-        if inspect.iscoroutinefunction(func):
-            raise TypeError("M1은 동기 함수만 지원합니다")
+        """도구 정의에 붙이는 데코레이터. 인터셉터의 단일 길목을 통과시킨다.
+
+        M4 #78: async def도 지원한다 — 단, 순차 실행만(한 번에 하나씩
+        await). asyncio.gather 등으로 실제 동시 호출되면
+        ConcurrentToolCallError로 거부된다(상세 근거는
+        docs/superpowers/specs/2026-08-21-async-tool-support-design.md).
+        """
+        is_async = inspect.iscoroutinefunction(func)
 
         # 도구가 실행되기 전 가장 이른 시점에 파이프라인 봉인(seal) 및 확정
         self._activate()
@@ -227,18 +248,24 @@ class Harness:
                 # _intercept는 정상 호출을 모델링하므로 여기선 합치기만 시도
                 return dict(kwargs)
 
+        if is_async:
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                # [이슈 #65] §5/§9 분리. 두 객체는 서로 다른 dict다(sync wrapper와 동일).
+                stage_ctx = self._session_state
+                log_ctx = _snapshot_context_for_log(self._context)
+                bound = _bound_args(args, kwargs)
+                tool_call = {"name": func.__name__, "args": bound}
+                return await self._intercept_async(
+                    tool_call, lambda: func(*args, **kwargs), stage_ctx, log_ctx
+                )
+
+            return async_wrapper  # type: ignore
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             # [이슈 #65] §5/§9 분리. 두 객체는 서로 다른 dict다.
-            # · stage_ctx: §5 세션 누적 상태. __init__에서 사용자
-            #   context의 얕은 복사로 seed됨. stage 함수가 agent_role
-            #   같은 정적 메타를 읽을 수 있고, 그 위에 counter·token
-            #   같은 동적 누적을 얹는다.
-            # · log_ctx: §9 정적 메타데이터. self._context의 호출 시점
-            #   얕은 복사본. stage_ctx의 mutation이 log로 새지 않도록
-            #   wrapper에서 미리 스냅샷.
-            # 분리하지 않으면 stage의 session mutation이 이번 호출의
-            # tool_wrap 로그 줄에 그대로 새어 들어간다 (이슈 #64 #65 배경).
             stage_ctx = self._session_state
             log_ctx = _snapshot_context_for_log(self._context)
 
@@ -318,6 +345,52 @@ class Harness:
         setattr(owner, attr_name, _wrapped)
         self._patch_state = (owner, attr_name, original)
 
+    def _run_guardrail_stages(
+        self,
+        tool_call: dict[str, Any],
+        stage_ctx: dict[str, Any] | None,
+        log_ctx: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """검사 + tool_wrap 기록 + live-rerun 위치 매칭 (sync/async 공유, M4 #78).
+
+        `_intercept`(sync)와 `_intercept_async`가 공통으로 쓰는 부분만
+        추출한 것 — do_call() 실행과 outcome 기록은 호출자가 각자
+        담당한다(sync는 즉시 호출, async는 await).
+
+        non-allow 판정은 tool_wrap을 기록한 뒤 예외로 환원해 던진다
+        (§4 비-silent 차단, §5 fail-closed). 통과하면 tool_wrap이 기록된
+        event dict를 반환한다.
+        """
+        pipeline = self._sealed_pipeline()  # _activate() 완료 후에만 유효.
+
+        # ① 검사: 첫 non-allow 승리(§5). stage_ctx가 stage에 직접 전달.
+        for _stage_name, stage_fn in pipeline:
+            verdict, rule_id, rationale, _stage_evt_id = stage_fn(tool_call, stage_ctx)
+            if verdict != Verdict.ALLOW:
+                # non-allow도 §9 그대로 tool_wrap 한 줄로 남긴다. 실행이
+                # 없었으므로 outcome 줄은 만들지 않는다.
+                event = self._event_store.record_tool_wrap(
+                    tool_name=tool_call["name"],
+                    args=tool_call.get("args", {}),
+                    context=log_ctx,
+                    verdict=str(verdict),
+                )
+                # _enforce는 verdict != ALLOW일 때 항상 예외를 던진다.
+                _enforce(verdict, rule_id, rationale, evt_id=event["evt"])
+
+        # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
+        #    녹화된 시퀀스의 같은 자리인지 확인한다(§6 인자 매칭 규칙).
+        if self._replay_engine is not None:
+            self._replay_engine.match(tool_call["name"], tool_call.get("args", {}))
+
+        # ③ 통과한 경우에만 기록. §6 매칭 키 seq는 EventStore 내부에서 부여.
+        return self._event_store.record_tool_wrap(
+            tool_name=tool_call["name"],
+            args=tool_call.get("args", {}),
+            context=log_ctx,
+            verdict="allow",
+        )
+
     def _intercept(
         self,
         tool_call: dict[str, Any],
@@ -325,23 +398,11 @@ class Harness:
         stage_ctx: dict[str, Any] | None,
         log_ctx: dict[str, Any] | None,
     ) -> Any:
-        """집행 표면(§3 표, 권장, 강제 집행 경로).
+        """집행 표면(§3 표, 권장, 강제 집행 경로) — 동기 도구 전용.
 
-        도구 실행 직전에 가드레일 파이프라인을 돌리고, 첫 non-allow에서
-        즉시 예외를 던진다(§5 short-circuit, §4 비-silent 차단). 통과한
-        경우에만 do_call을 실행한다 — 이 한 자리가 "집행 여부" 결정의
-        유일한 지점이며, _observe와 책임이 겹치지 않는다(§3 표면 분리).
-
-        mode="live-rerun"이면 실제 함수 호출 직전에 ReplayEngine.match()로
-        녹화 시퀀스와의 위치 매칭을 검증한다(§6). 매칭 실패는
-        ReplayMismatchError로 그대로 전파된다 — 가드레일이 이전 실행과
-        다른 지점에서 개입하면 그 이후 위치 매칭이 깨지는 것 자체가
-        §6 "정직한 한계"의 관측 결과이므로 여기서 흡수하지 않는다.
-
-        [이슈 #65] 인자 분리: stage_ctx(§5 세션 누적 상태, 가변)와
-        log_ctx(§9 정적 메타데이터, 호출 시점 얕은 복사)를 별개로
-        받는다. stage_ctx는 stage 함수에, log_ctx는 record_tool_wrap에
-        각각 전달되어 stage의 mutation이 이번 호출 로그에 새지 않는다.
+        검사·기록은 `_run_guardrail_stages`에 위임하고, 여기서는 실제
+        도구 호출(동기)과 outcome 기록만 담당한다. mode="live-rerun"
+        위치 매칭도 `_run_guardrail_stages` 안에서 수행된다(§6).
 
         Args:
             tool_call: {"name": str, "args": dict} 형태의 호출 정보.
@@ -353,56 +414,85 @@ class Harness:
             Denied | RetryRequested | ApprovalRequired: 첫 non-allow 판정.
             ReplayMismatchError: live-rerun 위치 매칭 실패.
         """
-        pipeline = self._sealed_pipeline()  # _activate() 완료 후에만 유효.
-
-        # ① 검사: 첫 non-allow 승리(§5). stage_ctx가 stage에 직접 전달.
-        for _stage_name, stage_fn in pipeline:
-            verdict, rule_id, rationale, _stage_evt_id = stage_fn(tool_call, stage_ctx)
-            if verdict != Verdict.ALLOW:
-                # [버그 픽스 B] non-allow도 §9 그대로 tool_wrap 한 줄로
-                # 남긴다. 실행이 없었으므로 outcome 줄은 만들지 않는다
-                # (§9 생애주기 비대칭 — outcome이 없을 수 있다는 것과
-                # 일관됨). evt_id는 스테이지가 반환한 placeholder 대신
-                # 방금 기록된 진짜 evt를 쓴다 — 스테이지는 실제 evt id를
-                # 미리 알 수 없다(부여는 EventStore의 책임).
-                event = self._event_store.record_tool_wrap(
-                    tool_name=tool_call["name"],
-                    args=tool_call.get("args", {}),
-                    context=log_ctx,
-                    verdict=str(verdict),
-                )
-                # 예외로 환원 — 원본 도구는 호출되지 않음(§4).
-                _enforce(verdict, rule_id, rationale, evt_id=event["evt"])
-                return  # type: ignore[unreachable]
-
-        # ② live-rerun 위치 매칭: 실제(부작용 있는) 함수 호출보다 먼저,
-        #    녹화된 시퀀스의 같은 자리인지 확인한다(§6 인자 매칭 규칙).
-        if self._replay_engine is not None:
-            self._replay_engine.match(tool_call["name"], tool_call.get("args", {}))
-
-        # ③ 집행: 통과한 경우에만 기록 + 실행.
-        #    [이슈 #65] log_ctx는 호출 시점 얕은 복사본 — stage가
-        #    stage_ctx를 mutate해도 이번 로그 줄에 영향 없음.
-        #    §6 매칭 키 seq는 EventStore.record_tool_wrap 내부에서 부여한다.
-        event = self._event_store.record_tool_wrap(
-            tool_name=tool_call["name"],
-            args=tool_call.get("args", {}),
-            context=log_ctx,
-            verdict="allow",
-        )
+        event = self._run_guardrail_stages(tool_call, stage_ctx, log_ctx)
         try:
             result = do_call()
         except Exception as exc:
             # §7 분류 테이블(SQL featurize 등)은 M2 스코프. 다운스트림
-            # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고
-            # 항상 featurize로 재계산하므로, M1은 의식적으로 선택한
-            # 고정값(warning)만 채운다(§37 — 조용한 기본값 금지는
-            # EventStore API 쪽 계약이지 호출자의 판단까지 금지하지 않음).
+            # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고 항상
+            # featurize로 재계산하므로, 여기서는 의식적으로 선택한 고정값
+            # (warning)만 채운다 — 예외 종류와 무관한 고정 warning
+            # 기본값이 §7 표를 어기는 별개 결함이라는 점은 CLAUDE.md §31에
+            # 이미 문서화되어 있다(조용한 기본값이 아니라 의도적 선택임을
+            # 명시).
             self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
             raise
         else:
             self._event_store.record_ok(event)
             return result
+
+    async def _intercept_async(
+        self,
+        tool_call: dict[str, Any],
+        do_call: Callable[[], Awaitable[Any]],
+        stage_ctx: dict[str, Any] | None,
+        log_ctx: dict[str, Any] | None,
+    ) -> Any:
+        """집행 표면의 async 버전(M4 #78) — 순차 async 전용.
+
+        `asyncio.gather` 등으로 실제 동시 호출되면 즉시
+        `ConcurrentToolCallError`를 던져 거부한다(조용한 직렬화 금지).
+        락 획득부터 해제까지 구간에서 `await`는 `await do_call()` 한
+        곳뿐이라, "검사 시작 → seq 부여 → 실행 → outcome 기록"이
+        원자적 단위가 되고 seq 부여 순서가 항상 호출 순서와 일치한다
+        (sync 모드와 동일한 §6 보장). 같은 이유로 등록된 async 도구가
+        내부에서 또 다른 등록된 async 도구를 await하는 중첩(재진입)
+        호출도 지원하지 않는다 — sync 경로(`_intercept`)는 중첩 호출이
+        문제없이 동작하는 것과 대비되는 의도된 비대칭이다.
+
+        Args:
+            tool_call: {"name": str, "args": dict} 형태의 호출 정보.
+            do_call: 실제 도구 코루틴을 반환하는 no-arg callable.
+            stage_ctx: §5 세션 누적 상태.
+            log_ctx: §9 정적 메타데이터.
+
+        Raises:
+            ConcurrentToolCallError: 다른 async 도구 호출이 이미 진행 중.
+            Denied | RetryRequested | ApprovalRequired: 첫 non-allow 판정.
+            ReplayMismatchError: live-rerun 위치 매칭 실패.
+        """
+        if self._async_lock.locked():
+            raise ConcurrentToolCallError(
+                f"'{tool_call['name']}' 호출이 이미 진행 중인 "
+                f"'{self._in_flight_tool}' 호출과 겹쳤습니다. rein은 순차 "
+                "async만 지원합니다. 원인은 둘 중 하나입니다 — ① "
+                "asyncio.gather 등으로 등록된 도구 여러 개를 실제 동시에 "
+                "호출했거나, ② 등록된 async 도구 안에서 또 다른 등록된 "
+                "async 도구를 await(중첩/재진입)했습니다. ①은 도구 호출을 "
+                "묶지 말고 하나씩 await 하세요. ②는 sync 경로와 달리 "
+                "async는 중첩 호출을 지원하지 않습니다(의도된 제약)."
+            )
+        async with self._async_lock:
+            self._in_flight_tool = tool_call["name"]
+            try:
+                event = self._run_guardrail_stages(tool_call, stage_ctx, log_ctx)
+                try:
+                    result = await do_call()
+                except Exception as exc:
+                    # §7 분류 테이블(SQL featurize 등)은 M2 스코프. 다운스트림
+                    # 규칙 엔진(rules/__init__.py)은 이 값을 신뢰하지 않고
+                    # 항상 featurize로 재계산하므로, 여기서는 _intercept와
+                    # 동일하게 의식적으로 선택한 고정값(warning)만 채운다 —
+                    # 예외 종류와 무관한 고정 warning 기본값이 §7 표를
+                    # 어기는 별개 결함이라는 점은 CLAUDE.md §31에 이미
+                    # 문서화되어 있다(조용한 기본값이 아니라 의도적 선택).
+                    self._event_store.record_error(event, exc, severity=SEVERITY_WARNING)
+                    raise
+                else:
+                    self._event_store.record_ok(event)
+                    return result
+            finally:
+                self._in_flight_tool = None
 
     def _observe(self, response_or_event: Any) -> None:
         """관측 표면(§3 표, 옵트인, default-off).

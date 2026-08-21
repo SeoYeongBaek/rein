@@ -21,7 +21,7 @@ from rein.guardrails.exceptions import (
     GuardrailVerdictError,
     RetryRequested,
 )
-from rein.harness import Harness
+from rein.harness import ConcurrentToolCallError, Harness
 
 __all__ = [
     "Harness",
@@ -29,5 +29,6 @@ __all__ = [
     "Denied",
     "RetryRequested",
     "ApprovalRequired",
+    "ConcurrentToolCallError",
 ]
 __version__ = "0.1.0"
